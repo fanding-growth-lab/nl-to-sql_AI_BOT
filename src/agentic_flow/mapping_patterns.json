@@ -1,0 +1,409 @@
+{
+  "version": "1.1",
+  "description": "RAG 기반 스키마 매핑 패턴 문서 (개선됨)",
+  "patterns": [
+    {
+      "id": "membership_performance_monthly",
+      "category": "membership_performance",
+      "priority": "high",
+      "query_patterns": [
+        ".*(1월|2월|3월|4월|5월|6월|7월|8월|9월|10월|11월|12월).*(멤버십|맴버쉽).*(성과|실적|분석).*",
+        ".*(멤버십|맴버쉽).*(성과|실적|분석).*(1월|2월|3월|4월|5월|6월|7월|8월|9월|10월|11월|12월).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status",
+        "no"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT CONCAT(YEAR(NOW()), '-{month}') as analysis_month, COUNT(*) as total_members, COUNT(CASE WHEN status = 'A' THEN 1 END) as active_members, COUNT(CASE WHEN status = 'J' THEN 1 END) as pending_members, COUNT(CASE WHEN status = 'D' THEN 1 END) as deleted_members, ROUND(COUNT(CASE WHEN status = 'A' THEN 1 END) * 100.0 / COUNT(*), 2) as active_rate_percent, ROUND(COUNT(CASE WHEN status = 'J' THEN 1 END) * 100.0 / COUNT(*), 2) as pending_rate_percent, ROUND(COUNT(CASE WHEN status = 'D' THEN 1 END) * 100.0 / COUNT(*), 2) as deletion_rate_percent FROM t_member",
+      "confidence": 0.95,
+      "examples": [
+        "9월 멤버십 성과 분석해줄수있어?",
+        "8월 맴버쉽 실적을 보여줘",
+        "7월 멤버십 성과 분석",
+        "6월 맴버쉽 실적 조회"
+      ],
+      "metadata": {
+        "frequency": "very_high",
+        "business_impact": "high",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "monthly_new_members_improved",
+      "category": "membership_new",
+      "priority": "very_high",
+      "query_patterns": [
+        ".*(1월|2월|3월|4월|5월|6월|7월|8월|9월|10월|11월|12월).*(신규|새로운|가입).*(회원|맴버|멤버).*",
+        ".*(신규|새로운|가입).*(회원|맴버|멤버).*(1월|2월|3월|4월|5월|6월|7월|8월|9월|10월|11월|12월).*",
+        ".*(january|february|march|april|may|june|july|august|september|october|november|december).*(new|신규).*(members|회원).*",
+        ".*(jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec).*(new|신규).*(members|회원).*"
+      ],
+      "table": "t_member_login_log",
+      "columns": [
+        "member_no",
+        "ins_datetime"
+      ],
+      "conditions": "DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
+      "aggregation": "COUNT(DISTINCT member_no)",
+      "sql_template": "SELECT COUNT(DISTINCT member_no) as new_members FROM t_member_login_log WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
+      "confidence": 0.98,
+      "examples": [
+        "8월 신규 회원수",
+        "9월달 신규회원 현황을 알려줘",
+        "August new members",
+        "신규 가입자 8월"
+      ],
+      "metadata": {
+        "frequency": "very_high",
+        "business_impact": "high",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "top_creators_by_members",
+      "category": "ranking_creators",
+      "priority": "high",
+      "query_patterns": [
+        ".*(상위|탑|top)\\s*(\\d+)\\s*(크리에이터|creator).*",
+        ".*(\\d+)\\s*위\\s*(크리에이터|creator).*",
+        ".*(인기|popular)\\s*(\\d+)\\s*(크리에이터|creator).*",
+        ".*(회원|member).*(제일|가장|most).*(많은|many).*(크리에이터|creator).*"
+      ],
+      "table": "t_creator",
+      "columns": [
+        "no",
+        "member_no"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(c.no)",
+      "sql_template": "SELECT c.no as creator_no, c.member_no, COUNT(c.no) as creator_count FROM t_creator c WHERE c.del_datetime IS NULL GROUP BY c.no, c.member_no ORDER BY creator_count DESC LIMIT {top_n}",
+      "confidence": 0.95,
+      "examples": [
+        "회원수가 제일 많은 Top5 크리에이터들을 뽑아줘",
+        "상위 10 크리에이터",
+        "top 3 creators",
+        "인기 크리에이터 5명"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "medium",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "member_count_total",
+      "category": "member_count",
+      "priority": "very_high",
+      "query_patterns": [
+        ".*(전체|총|모든).*(회원|맴버).*(수|명|명수).*",
+        ".*(회원|맴버).*(전체|총|모든).*(수|명).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "no"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as total_members FROM t_member",
+      "confidence": 0.98,
+      "examples": [
+        "전체 회원 수를 알려줘",
+        "총 맴버 수는 얼마나 되나요?",
+        "모든 회원 명수를 조회해줘"
+      ],
+      "metadata": {
+        "frequency": "very_high",
+        "business_impact": "high",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "member_count_active",
+      "category": "active_members",
+      "priority": "high",
+      "query_patterns": [
+        ".*(활성|active).*(회원|맴버).*(수|명).*",
+        ".*(회원|맴버).*(활성|active).*(수|명).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "status = 'A'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as active_members FROM t_member WHERE status = 'A'",
+      "confidence": 0.97,
+      "examples": [
+        "활성 회원 수는 얼마나 되나요?",
+        "active 맴버 수를 조회해줘",
+        "활성화된 회원 명수"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "high",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "member_count_inactive",
+      "category": "inactive_members",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(인증대기|pending|대기).*(회원|맴버).*(수|명).*",
+        ".*(회원|맴버).*(인증대기|pending).*(수|명).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "status = 'J'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as pending_members FROM t_member WHERE status = 'J'",
+      "confidence": 0.95,
+      "examples": [
+        "인증대기 회원 수를 조회해줘",
+        "pending 맴버 수는 얼마나 되나요?",
+        "대기중인 회원 명수"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "member_count_deleted",
+      "category": "deleted_members",
+      "priority": "low",
+      "query_patterns": [
+        ".*(삭제|deleted|제거).*(회원|맴버).*(수|명).*",
+        ".*(회원|맴버).*(삭제|deleted).*(수|명).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "status = 'D'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as deleted_members FROM t_member WHERE status = 'D'",
+      "confidence": 0.95,
+      "examples": [
+        "삭제된 회원 수를 조회해줘",
+        "deleted 맴버 수는 얼마나 되나요?",
+        "제거된 회원 명수"
+      ],
+      "metadata": {
+        "frequency": "low",
+        "business_impact": "low",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "member_trend_monthly",
+      "category": "monthly_trend",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(월별|월간).*(회원|맴버).*(추이|변화|증감).*",
+        ".*(회원|맴버).*(월별|월간).*(추이|변화).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "status = 'A'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as active_members FROM t_member WHERE status = 'A'",
+      "confidence": 0.9,
+      "examples": [
+        "월별 회원 추이를 분석해줘",
+        "월간 맴버 변화를 보여줘",
+        "회원 증감 추이"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "member_ratio_active",
+      "category": "member_ratio",
+      "priority": "high",
+      "query_patterns": [
+        ".*(활성|active).*(비율|율|퍼센트|%).*",
+        ".*(비율|율|퍼센트|%).*(활성|active).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "1=1",
+      "aggregation": "ROUND(COUNT(CASE WHEN status = 'A' THEN 1 END) * 100.0 / COUNT(*), 2)",
+      "sql_template": "SELECT ROUND(COUNT(CASE WHEN status = 'A' THEN 1 END) * 100.0 / COUNT(*), 2) as active_rate_percent FROM t_member",
+      "confidence": 0.92,
+      "examples": [
+        "활성 회원 비율을 알려줘",
+        "active 회원율은 얼마나 되나요?",
+        "활성화 비율 조회"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "high",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "member_ratio_inactive",
+      "category": "member_ratio",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(인증대기|pending).*(비율|율|퍼센트|%).*",
+        ".*(비율|율|퍼센트|%).*(인증대기|pending).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "1=1",
+      "aggregation": "ROUND(COUNT(CASE WHEN status = 'J' THEN 1 END) * 100.0 / COUNT(*), 2)",
+      "sql_template": "SELECT ROUND(COUNT(CASE WHEN status = 'J' THEN 1 END) * 100.0 / COUNT(*), 2) as pending_rate_percent FROM t_member",
+      "confidence": 0.9,
+      "examples": [
+        "인증대기 회원 비율을 알려줘",
+        "pending 회원율은 얼마나 되나요?",
+        "대기중인 회원 비율 조회"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "member_ratio_deleted",
+      "category": "member_ratio",
+      "priority": "low",
+      "query_patterns": [
+        ".*(삭제|deleted).*(비율|율|퍼센트|%).*",
+        ".*(비율|율|퍼센트|%).*(삭제|deleted).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "1=1",
+      "aggregation": "ROUND(COUNT(CASE WHEN status = 'D' THEN 1 END) * 100.0 / COUNT(*), 2)",
+      "sql_template": "SELECT ROUND(COUNT(CASE WHEN status = 'D' THEN 1 END) * 100.0 / COUNT(*), 2) as deletion_rate_percent FROM t_member",
+      "confidence": 0.9,
+      "examples": [
+        "삭제된 회원 비율을 알려줘",
+        "deleted 회원율은 얼마나 되나요?",
+        "삭제 비율 조회"
+      ],
+      "metadata": {
+        "frequency": "low",
+        "business_impact": "low",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "member_growth_rate",
+      "category": "growth_analysis",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(성장|증가|증감).*(율|비율|퍼센트|%).*",
+        ".*(율|비율|퍼센트|%).*(성장|증가|증감).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "status"
+      ],
+      "conditions": "status = 'A'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as growth_members FROM t_member WHERE status = 'A'",
+      "confidence": 0.85,
+      "examples": [
+        "회원 성장율을 알려줘",
+        "증가 비율은 얼마나 되나요?",
+        "성장률 분석"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "high"
+      }
+    },
+    {
+      "id": "new_member_monthly",
+      "category": "new_members",
+      "priority": "high",
+      "query_patterns": [
+        ".*(신규|새로운|new).*(회원|맴버).*(현황|상황|수).*",
+        ".*(9월|9월달).*(신규|새로운).*(회원|맴버).*"
+      ],
+      "table": "t_member",
+      "columns": [
+        "no",
+        "status"
+      ],
+      "conditions": "DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
+      "aggregation": "COUNT(DISTINCT member_no)",
+      "sql_template": "SELECT COUNT(DISTINCT member_no) as new_members FROM t_member_login_log WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
+      "confidence": 0.95,
+      "examples": [
+        "9월달 신규회원 현황을 알려줘",
+        "새로운 회원 수는 얼마나 되나요?",
+        "신규 맴버 현황"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "high",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "popular_posts",
+      "category": "content_analysis",
+      "priority": "high",
+      "query_patterns": [
+        ".*(인기|popular).*(포스트|게시글|글).*(top|상위|순위).*",
+        ".*(top|상위|순위).*(인기|popular).*(포스트|게시글).*"
+      ],
+      "table": "t_post",
+      "columns": [
+        "no",
+        "title",
+        "view_count",
+        "like_count"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT p.no, p.title, p.view_count, p.like_count FROM t_post p ORDER BY p.view_count DESC, p.like_count DESC LIMIT 5",
+      "confidence": 0.9,
+      "examples": [
+        "인기 포스트 TOP5를 알려줘",
+        "상위 인기 게시글을 보여줘",
+        "popular 포스트 순위"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "medium",
+        "complexity": "medium"
+      }
+    }
+  ],
+  "statistics": {
+    "total_patterns": 12,
+    "high_priority": 5,
+    "medium_priority": 4,
+    "low_priority": 2,
+    "avg_confidence": 0.9266666666666666,
+    "coverage_estimate": "90%",
+    "last_updated": "2024-12-19",
+    "schema_version": "1.2",
+    "notes": "Updated to match actual DB schema - fixed table/column references and status codes"
+  }
+}
