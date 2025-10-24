@@ -48,8 +48,8 @@ dependencies = [
     "langchain-google-genai==0.0.6",
     "langgraph==0.0.20",
     
-    # Google AI
-    "google-generativeai==0.3.2",
+    # Google AI (최신 패키지)
+    "google_genai>=0.1.0",
     
     # HTTP Client
     "httpx==0.25.2",
