@@ -138,12 +138,6 @@ def create_agent_graph(
     settings = get_settings()
     if config is None:
         config = {
-            "llm_config": {
-                "model": settings.llm.model,
-                "api_key": settings.llm.api_key,
-                "temperature": settings.llm.temperature,
-                "max_tokens": settings.llm.max_tokens
-            },
             "llm": {
                 "model": settings.llm.model,
                 "api_key": settings.llm.api_key,
@@ -294,7 +288,7 @@ def route_after_validation(state: AgentState) -> str:
         state: Current pipeline state
         
     Returns:
-        Next node name ("retry" or "execute")
+        Next node name ("retry", "validate", or "sql_execution")
     """
     validation_result = state.get("validation_result", {})
     retry_count = state.get("retry_count", 0)
@@ -317,8 +311,8 @@ def route_after_validation(state: AgentState) -> str:
         state["retry_count"] = retry_count + 1
         return "retry"
     else:
-        logger.warning("Max retries exceeded, proceeding with invalid SQL to avoid infinite loop")
-        # 재시도 카운트 초기화
+        logger.warning("Max retries exceeded, proceeding to validation check for final decision")
+        # 재시도 카운트 초기화하고 validation_check에서 최종 결정
         state["retry_count"] = 0
         return "validate"
 
@@ -331,7 +325,7 @@ def route_after_validation_check(state: AgentState) -> str:
         state: Current pipeline state
         
     Returns:
-        str: 다음 노드 이름
+        str: 다음 노드 이름 ("sql_execution", "user_review", "reject")
     """
     validation_result = state.get("validation_result")
     processing_decision = state.get("processing_decision", {})
@@ -340,28 +334,28 @@ def route_after_validation_check(state: AgentState) -> str:
         logger.warning("No validation result found, defaulting to user review")
         return "user_review"
     
-    # 자동 승인 조건 확인
+    # 자동 승인 조건 확인 (높은 신뢰도)
     if processing_decision.get("auto_approve", False):
         logger.info("Auto-approving query based on high confidence")
         return "sql_execution"
     
-    # 검증 실패 시 거부 - 무한 루프 방지를 위해 sql_execution으로 강제 진행
-    if validation_result.status.value == "rejected":
-        logger.warning("Query rejected due to validation issues, but proceeding to execution to avoid infinite loop")
+    # 높은 신뢰도면 자동 승인
+    if hasattr(validation_result, 'confidence') and validation_result.confidence >= 0.85:
+        logger.info(f"High confidence ({validation_result.confidence:.2f}), auto-approving")
         return "sql_execution"
+    
+    # 검증 실패 시 사용자 검토로 이동 (강제 실행 제거)
+    if hasattr(validation_result, 'status') and validation_result.status.value == "rejected":
+        logger.warning("Query rejected due to validation issues, requiring user review")
+        return "user_review"
     
     # 사용자 검토 필요 조건 확인
     if processing_decision.get("needs_user_review", False):
         logger.info("Query requires user review")
         return "user_review"
     
-    # 높은 신뢰도면 자동 승인
-    if validation_result.confidence >= 0.85:
-        logger.info(f"High confidence ({validation_result.confidence:.2f}), auto-approving")
-        return "sql_execution"
-    
     # 기본적으로 사용자 검토로 이동
-    logger.info("Defaulting to user review")
+    logger.info("Defaulting to user review for safety")
     return "user_review"
 
 
@@ -393,26 +387,6 @@ def route_after_user_review(state: AgentState) -> str:
     else:
         logger.warning(f"Unknown review status: {review_status}, defaulting to reject")
         return "reject"
-
-
-def should_retry_generation(state: AgentState) -> bool:
-    """
-    Determine if SQL generation should be retried.
-    
-    Args:
-        state: Current pipeline state
-        
-    Returns:
-        True if should retry, False otherwise
-    """
-    validation_result = state.get("validation_result", {})
-    retry_count = state.get("retry_count", 0)
-    max_retries = state.get("max_retries", 3)
-    
-    return (
-        not validation_result.get("is_valid", False) and 
-        retry_count < max_retries
-    )
 
 
 def _execute_sql_query(state: AgentState) -> AgentState:
@@ -496,29 +470,6 @@ def _execute_sql_query(state: AgentState) -> AgentState:
     return state
 
 
-def handle_errors(state: AgentState) -> AgentState:
-    """
-    Handle errors in the pipeline state.
-    
-    Args:
-        state: Current pipeline state
-        
-    Returns:
-        Updated state with error handling applied
-    """
-    error_message = state.get("error_message")
-    if error_message:
-        logger.error(f"Pipeline error: {error_message}")
-        
-        # Set final state
-        state["success"] = False
-        state["execution_status"] = ExecutionStatus.FAILED.value
-        state["final_sql"] = state.get("sql_query")
-        state["explanation"] = f"처리 중 오류가 발생했습니다: {error_message}"
-    
-    return state
-
-
 def initialize_state(
     user_query: str,
     user_id: Optional[str] = None,
@@ -562,9 +513,6 @@ def initialize_state(
         # Conversation handling
         skip_sql_generation=False,
         conversation_response=None,
-        
-        # LLM Intent Classification
-        llm_intent_result=None,
         
         # Fanding templates
         fanding_template=None,

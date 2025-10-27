@@ -10,18 +10,21 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from core.logging import get_logger
 from .base_handler import BaseSlackHandler
+
+logger = get_logger(__name__)
+
 try:
     from src.monitoring.error_monitor import record_slack_error, record_sql_generation_error, record_nl_processing_error
 except ImportError:
-    # 모니터링 모듈이 없는 경우 무시
+    # 모니터링 모듈이 없는 경우 경고 로그 출력
+    logger.warning("Monitoring module not found, skipping error recording.")
+    
     def record_slack_error(message, severity, user_id=None, channel_id=None):
         pass
     def record_sql_generation_error(message, severity, user_id=None, channel_id=None):
         pass
     def record_nl_processing_error(message, severity, user_id=None, channel_id=None):
         pass
-
-logger = get_logger(__name__)
 
 
 class MessageHandler(BaseSlackHandler):
@@ -57,63 +60,10 @@ class MessageHandler(BaseSlackHandler):
             
             # Extract and validate query
             query = message.get("text", "").strip()
-            if not query:
-                help_message = self._get_help_message()
-                say(help_message)
-                return
-            
-            # Log the event
-            self._log_event("direct_message", message)
-            
-            # Get thread timestamp for responses
             thread_ts = self._get_thread_timestamp(message)
             
-            # Process the query first to check if it's a conversational response
-            if self.agent_runner:
-                try:
-                    # Run the agent pipeline
-                    result = self._run_agent_pipeline(query)
-                    
-                    # Check if it's a conversational response
-                    if hasattr(result, 'to_dict'):
-                        result_dict = result.to_dict()
-                    elif hasattr(result, '__dict__'):
-                        result_dict = result.__dict__
-                    else:
-                        result_dict = result
-                    
-                    # If it's a conversational response, don't send processing message
-                    if result_dict.get("conversation_response"):
-                        formatted_response = self._format_agent_response(result)
-                        say(formatted_response, thread_ts=thread_ts)
-                        return
-                    
-                    # For data queries, send processing message
-                    say("🔍 **쿼리를 분석하고 있습니다...**\n\n"
-                         "⏳ 자연어 처리 → SQL 생성 → 데이터 조회 순서로 진행됩니다.", 
-                         thread_ts=thread_ts)
-                    
-                    # Format and send response
-                    formatted_response = self._format_agent_response(result)
-                    say(formatted_response, thread_ts=thread_ts)
-                    
-                except Exception as e:
-                    # Send processing message for errors too
-                    say("🔍 **쿼리를 분석하고 있습니다...**\n\n"
-                         "⏳ 자연어 처리 → SQL 생성 → 데이터 조회 순서로 진행됩니다.", 
-                         thread_ts=thread_ts)
-                    
-                    error_msg = self._format_error_message(e)
-                    say(error_msg, thread_ts=thread_ts)
-                    
-                    # Add alternative suggestions based on error type
-                    suggestions = self._get_alternative_suggestions(e, query)
-                    if suggestions:
-                        say(suggestions, thread_ts=thread_ts)
-                    
-                    logger.error(f"Agent pipeline error: {str(e)}", exc_info=True)
-            else:
-                say("❌ 에이전트가 초기화되지 않았습니다.", thread_ts=thread_ts)
+            # Process using common logic
+            self._process_and_respond(query, message, say, thread_ts, is_mention=False)
                 
         except Exception as e:
             logger.error(f"Message handler error: {str(e)}", exc_info=True)
@@ -130,30 +80,45 @@ class MessageHandler(BaseSlackHandler):
         try:
             # Extract query from mention
             query = self._extract_query_from_mention(event.get("text", ""))
+            thread_ts = self._get_thread_timestamp(event)
+            
+            # Process using common logic
+            self._process_and_respond(query, event, say, thread_ts, is_mention=True)
+                
+        except Exception as e:
+            logger.error(f"App mention handler error: {str(e)}", exc_info=True)
+            say("❌ 멘션 처리 중 오류가 발생했습니다.")
+    
+    def _process_and_respond(self, query: str, event_data: Dict[str, Any], say: callable, thread_ts: Optional[str], is_mention: bool):
+        """
+        Common processing and response logic for both message and mention handlers.
+        
+        Args:
+            query: Extracted query text
+            event_data: Original event data for logging
+            say: Function to send response message
+            thread_ts: Thread timestamp for responses
+            is_mention: Whether this is from a mention event
+        """
+        try:
+            # Handle empty query
             if not query:
-                help_message = self._get_help_message(is_mention=True)
-                say(help_message)
+                help_message = self._get_help_message(is_mention=is_mention)
+                say(help_message, thread_ts=thread_ts)
                 return
             
             # Log the event
-            self._log_event("app_mention", event)
+            event_type = "app_mention" if is_mention else "direct_message"
+            self._log_event(event_type, event_data)
             
-            # Get thread timestamp for responses
-            thread_ts = self._get_thread_timestamp(event)
-            
-            # Process the query first to check if it's a conversational response
+            # Process the query
             if self.agent_runner:
                 try:
                     # Run the agent pipeline
                     result = self._run_agent_pipeline(query)
                     
-                    # Check if it's a conversational response
-                    if hasattr(result, 'to_dict'):
-                        result_dict = result.to_dict()
-                    elif hasattr(result, '__dict__'):
-                        result_dict = result.__dict__
-                    else:
-                        result_dict = result
+                    # result is already a dict from _run_agent_pipeline
+                    result_dict = result if isinstance(result, dict) else result
                     
                     # If it's a conversational response, don't send processing message
                     if result_dict.get("conversation_response"):
@@ -186,12 +151,11 @@ class MessageHandler(BaseSlackHandler):
                     
                     logger.error(f"Agent pipeline error: {str(e)}", exc_info=True)
             else:
-                # No agent runner available
                 say("❌ 에이전트가 초기화되지 않았습니다.", thread_ts=thread_ts)
                 
         except Exception as e:
-            logger.error(f"App mention handler error: {str(e)}", exc_info=True)
-            say("❌ 멘션 처리 중 오류가 발생했습니다.")
+            logger.error(f"Process and respond error: {str(e)}", exc_info=True)
+            say("❌ 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
     
     def _run_agent_pipeline(self, query: str) -> Dict[str, Any]:
         """
@@ -203,13 +167,38 @@ class MessageHandler(BaseSlackHandler):
         Returns:
             Agent pipeline result
         """
-        if hasattr(self.agent_runner, 'process_query_async'):
-            # Use async method if available
-            import asyncio
-            return asyncio.run(self.agent_runner.process_query_async(user_query=query))
-        else:
-            # Use sync method directly
-            return self.agent_runner.process_query(user_query=query)
+        try:
+            # Generate session ID for this query
+            import uuid
+            session_id = str(uuid.uuid4())
+            
+            # Use sync method directly - Slack Bolt handles threading internally
+            result = self.agent_runner.process_query(
+                user_query=query,
+                session_id=session_id
+            )
+            
+            # Ensure result is properly converted to dict
+            if hasattr(result, 'to_dict'):
+                return result.to_dict()
+            elif hasattr(result, '__dict__'):
+                return result.__dict__
+            else:
+                return result
+                
+        except Exception as e:
+            logger.error(f"Agent pipeline execution failed: {str(e)}", exc_info=True)
+            # Return error result in expected format
+            return {
+                "success": False,
+                "error_message": str(e),
+                "conversation_response": None,
+                "sql_query": None,
+                "final_sql": None,
+                "query_result": [],
+                "data_summary": None,
+                "confidence_scores": {}
+            }
     
     def _format_agent_response(self, result) -> str:
         """
@@ -224,8 +213,10 @@ class MessageHandler(BaseSlackHandler):
         if not result:
             return "❌ 결과를 처리하는 중 오류가 발생했습니다."
         
-        # Handle GraphExecutionResult object
-        if hasattr(result, 'to_dict'):
+        # Handle GraphExecutionResult object - result should already be a dict from _run_agent_pipeline
+        if isinstance(result, dict):
+            result_dict = result
+        elif hasattr(result, 'to_dict'):
             result_dict = result.to_dict()
         elif hasattr(result, '__dict__'):
             result_dict = result.__dict__
@@ -372,8 +363,8 @@ class MessageHandler(BaseSlackHandler):
         if "timeout" in error_message or isinstance(error, TimeoutError):
             return ("⏰ **요청 처리 시간이 초과되었습니다**\n\n"
                    "더 간단한 쿼리로 다시 시도해주세요:\n"
-                   "• '사용자 수를 알려줘'\n"
-                   "• '최근 펀딩 10개 보여줘'")
+                   "• '전체 회원 수를 알려줘'\n"
+                   "• '활성 회원 수를 알려줘'")
         
         elif "connection" in error_message or "database" in error_message:
             return ("🗄️ **데이터베이스 연결에 문제가 있습니다**\n\n"
@@ -382,9 +373,9 @@ class MessageHandler(BaseSlackHandler):
         elif "validation" in error_message or isinstance(error, ValueError):
             return ("❓ **질문을 이해하지 못했습니다**\n\n"
                    "다음과 같이 다시 질문해주세요:\n"
-                   "• '모든 사용자 목록을 보여줘'\n"
-                   "• '활성 사용자 수를 알려줘'\n"
-                   "• '최근 펀딩 프로젝트 5개 보여줘'")
+                   "• '전체 회원 수를 알려줘'\n"
+                   "• '활성 회원 수를 알려줘'\n"
+                   "• '이번 달 신규 회원 수 알려줘'")
         
         elif "permission" in error_message or isinstance(error, PermissionError):
             return ("🔒 **권한이 없습니다**\n\n"
@@ -427,33 +418,33 @@ class MessageHandler(BaseSlackHandler):
         # Timeout errors - suggest simpler queries
         if "timeout" in error_message or isinstance(error, TimeoutError):
             return ("💡 **더 간단한 쿼리를 시도해보세요:**\n\n"
-                   "• '사용자 수를 알려줘'\n"
-                   "• '최근 펀딩 5개 보여줘'\n"
-                   "• '활성 사용자 목록 보여줘'\n"
-                   "• '오늘 가입한 사용자 수 알려줘'")
+                   "• '전체 회원 수를 알려줘'\n"
+                   "• '활성 회원 수를 알려줘'\n"
+                   "• '이번 달 신규 회원 수 알려줘'\n"
+                   "• '월간 매출 분석 결과 알려줘'")
         
         # Validation errors - suggest better query formats
         elif "validation" in error_message or isinstance(error, ValueError):
             return ("💡 **다음과 같이 질문해보세요:**\n\n"
-                   "• '모든 사용자 목록을 보여줘'\n"
-                   "• '펀딩 프로젝트 중 성공한 것들 보여줘'\n"
-                   "• '크리에이터 목록을 알려줘'\n"
-                   "• '최근 7일간 가입한 사용자 수 알려줘'")
+                   "• '전체 회원 수를 알려줘'\n"
+                   "• '인기 포스트 TOP5 보여줘'\n"
+                   "• '크리에이터 부서별 분석해줘'\n"
+                   "• '회원 리텐션 현황 보여줘'")
         
         # Connection errors - suggest basic queries
         elif "connection" in error_message or "database" in error_message:
             return ("💡 **기본적인 쿼리로 시도해보세요:**\n\n"
-                   "• '사용자 수를 세어줘'\n"
-                   "• '테이블 목록을 보여줘'\n"
-                   "• '데이터베이스 상태 확인해줘'")
+                   "• '전체 회원 수를 알려줘'\n"
+                   "• '활성 회원 수를 알려줘'\n"
+                   "• '월별 회원 수 추이 보여줘'")
         
         # Query-related errors - suggest alternative approaches
         elif "sql" in error_message or "query" in error_message:
             return ("💡 **다른 방식으로 질문해보세요:**\n\n"
-                   "• 더 구체적으로: '활성 상태인 사용자 목록'\n"
-                   "• 더 간단하게: '사용자 수'\n"
-                   "• 다른 테이블: '펀딩 프로젝트 목록'\n"
-                   "• 날짜 조건: '이번 달 가입한 사용자'")
+                   "• 더 구체적으로: '4월 신규 회원 현황 알려줘'\n"
+                   "• 더 간단하게: '전체 회원 수'\n"
+                   "• 다른 분석: '월간 매출 분석', '팔로우 분석'\n"
+                   "• 날짜 조건: '이번 달 신규 회원', '최근 30일 방문자'")
         
         # No suggestions for other errors
         return ""
@@ -493,19 +484,22 @@ class MessageHandler(BaseSlackHandler):
         return (f"🤖 **DataTalk Bot 도움말**\n\n"
                f"안녕하세요! 자연어로 데이터베이스 쿼리를 요청할 수 있습니다.\n\n"
                f"**📝 사용 방법:**\n"
-               f"• `{mention_prefix}모든 사용자 목록을 보여줘`\n"
-               f"• `{mention_prefix}활성 사용자 수를 알려줘`\n"
-               f"• `{mention_prefix}최근 펀딩 프로젝트 5개 보여줘`\n"
-               f"• `{mention_prefix}크리에이터 목록을 알려줘`\n\n"
+               f"• `{mention_prefix}전체 회원 수를 알려줘`\n"
+               f"• `{mention_prefix}활성 회원 수를 알려줘`\n"
+               f"• `{mention_prefix}이번 달 신규 회원 수 알려줘`\n"
+               f"• `{mention_prefix}월별 회원 수 추이 보여줘`\n\n"
                f"**💡 자주 묻는 질문:**\n"
-               f"• 사용자 관련: '사용자 수', '가입한 사용자', '활성 사용자'\n"
-               f"• 펀딩 관련: '펀딩 목록', '성공한 프로젝트', '진행 중인 프로젝트'\n"
-               f"• 크리에이터 관련: '크리에이터 목록', '크리에이터 수'\n\n"
+               f"• 회원 관련: '전체 회원 수', '활성 회원 수', '신규 회원', '회원 리텐션'\n"
+               f"• 성과 관련: '월간 매출 분석', '방문자 수 추이', '매출 성장률'\n"
+               f"• 콘텐츠 관련: '인기 포스트 TOP5', '콘텐츠 참여도 분석'\n"
+               f"• 고급 분석: '크리에이터 부서별 분석', '팔로우 분석', '리뷰 분석'\n\n"
                f"**❓ 문제가 있으시면:**\n"
                f"• 더 간단한 질문으로 다시 시도해보세요\n"
                f"• 구체적인 조건을 추가해보세요 (예: '최근 7일간')\n"
                f"• 관리자에게 문의하세요\n\n"
                f"**🔧 예시 질문:**\n"
-               f"• `{mention_prefix}이번 달에 가입한 사용자 수 알려줘`\n"
-               f"• `{mention_prefix}성공한 펀딩 프로젝트 10개 보여줘`\n"
-               f"• `{mention_prefix}크리에이터 중 가장 많은 팔로워를 가진 사람`")
+               f"• `{mention_prefix}4월 신규 회원 현황 알려줘`\n"
+               f"• `{mention_prefix}인기 포스트 TOP10 보여줘`\n"
+               f"• `{mention_prefix}월간 매출 분석 결과 알려줘`\n"
+               f"• `{mention_prefix}크리에이터 부서별 성과 분석해줘`\n"
+               f"• `{mention_prefix}회원 리텐션 현황 보여줘`")

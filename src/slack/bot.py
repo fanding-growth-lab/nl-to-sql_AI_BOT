@@ -65,6 +65,11 @@ class SlackBot:
             # Get settings for pipeline configuration
             settings = get_settings()
             
+            # Load actual database schema
+            from core.db import get_cached_db_schema
+            db_schema = get_cached_db_schema()
+            logger.info(f"Loaded database schema: {len(db_schema)} tables")
+            
             # Create pipeline configuration
             pipeline_config = {
                 "llm_config": {
@@ -97,8 +102,11 @@ class SlackBot:
                 }
             }
             
-            # Initialize pipeline runner with full config
-            self.pipeline_runner = AgentGraphRunner(pipeline_config)
+            # Initialize pipeline runner with actual DB schema
+            self.pipeline_runner = AgentGraphRunner(
+                db_schema=db_schema,  # 실제 DB 스키마 전달
+                config=pipeline_config
+            )
             
             logger.info("NL-to-SQL pipeline initialized successfully")
             
@@ -284,138 +292,6 @@ Just type your question in natural language! For example:
             
         except Exception as e:
             logger.error(f"Failed to setup fallback handlers: {e}")
-    
-    def _process_message(self, text: str, channel: str, user: str, say: Callable, client):
-        """
-        Process a natural language message and generate SQL response.
-        
-        Args:
-            text: Message text
-            channel: Slack channel ID
-            user: Slack user ID
-            say: Slack say function
-            client: Slack client
-        """
-        try:
-            # Show typing indicator
-            client.conversations_setTyping(channel=channel)
-            
-            # Check if pipeline is available
-            if not self.pipeline_runner:
-                say("❌ Sorry, the data processing pipeline is not available right now.")
-                return
-            
-            # Check if message looks like a data query
-            if not self._is_data_query(text):
-                say("💡 Tip: Ask me about your data! Try: 'Show me sales data from last month'")
-                return
-            
-            # Process with pipeline
-            response = self._run_pipeline(text, user, channel)
-            
-            # Send response
-            self._send_response(response, channel, say)
-            
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
-            if self.config.show_error_details:
-                say(f"❌ Error: {str(e)}")
-            else:
-                say("❌ Sorry, I couldn't process your request. Please try again.")
-    
-    def _is_data_query(self, text: str) -> bool:
-        """
-        Check if the text looks like a data query.
-        
-        Args:
-            text: Input text
-            
-        Returns:
-            bool: True if it looks like a data query
-        """
-        # Simple heuristics to detect data queries
-        data_keywords = [
-            "show", "get", "find", "list", "count", "total", "sum", "average",
-            "data", "sales", "orders", "customers", "products", "revenue",
-            "last month", "this week", "yesterday", "today", "quarter",
-            "top", "best", "worst", "highest", "lowest"
-        ]
-        
-        text_lower = text.lower()
-        return any(keyword in text_lower for keyword in data_keywords)
-    
-    def _run_pipeline(self, query: str, user: str, channel: str) -> Dict[str, Any]:
-        """
-        Run the NL-to-SQL pipeline.
-        
-        Args:
-            query: Natural language query
-            user: Slack user ID
-            channel: Slack channel ID
-            
-        Returns:
-            Dict containing pipeline results
-        """
-        try:
-            # Create initial state
-            initial_state = {
-                "user_query": query,
-                "user_id": user,
-                "channel_id": channel,
-                "session_id": f"{user}_{channel}_{int(asyncio.get_event_loop().time())}",
-                "context": {
-                    "platform": "slack",
-                    "bot_name": self.config.bot_name
-                }
-            }
-            
-            # Run pipeline
-            result = self.pipeline_runner.run_sync(
-                initial_state=initial_state,
-                mode=ExecutionMode.STANDARD
-            )
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Pipeline execution error: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "final_response": "❌ Sorry, I couldn't process your query."
-            }
-    
-    def _send_response(self, result: Dict[str, Any], channel: str, say: Callable):
-        """
-        Send the pipeline result to Slack.
-        
-        Args:
-            result: Pipeline execution result
-            channel: Slack channel ID
-            say: Slack say function
-        """
-        try:
-            if result.get("success", False):
-                response_text = result.get("final_response", "✅ Query processed successfully!")
-                
-                # Add metadata if available
-                if "debug_info" in result:
-                    debug_info = result["debug_info"]
-                    if "sql_query" in debug_info:
-                        response_text += f"\n\n```sql\n{debug_info['sql_query']}\n```"
-            else:
-                error_msg = result.get("error", "Unknown error occurred")
-                response_text = f"❌ Error: {error_msg}"
-            
-            # Truncate if too long
-            if len(response_text) > self.config.max_message_length:
-                response_text = response_text[:self.config.max_message_length - 3] + "..."
-            
-            say(response_text)
-            
-        except Exception as e:
-            logger.error(f"Error sending response: {e}")
-            say("❌ Sorry, I couldn't send the response.")
     
     def _check_database_connection(self) -> bool:
         """Check if database connection is available."""

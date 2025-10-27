@@ -16,7 +16,7 @@ from enum import Enum
 # CompiledGraph is not directly importable in newer versions
 
 from .state_machine import AgentState, create_agent_graph, initialize_state
-from .context import AgentContextManager, MessageRole
+from .context import AgentContextManager
 from ..monitoring import PipelineMonitor, MetricsCollector
 from core.config import get_settings
 from core.logging import get_logger
@@ -98,7 +98,7 @@ class AgentGraphRunner:
         
         # Initialize components
         self.graph = create_agent_graph(db_schema, config)
-        self.context_manager = AgentContextManager(storage_backend="memory")
+        self.context_manager = AgentContextManager()
         
         if enable_monitoring:
             self.monitor = PipelineMonitor()
@@ -133,7 +133,11 @@ class AgentGraphRunner:
             GraphExecutionResult with the processing outcome
         """
         if session_id is None:
-            session_id = self.context_manager.create_session()
+            session_id = self.context_manager.create_session(
+                user_id=user_id,
+                channel_id=channel_id,
+                metadata=context
+            )
         
         logger.info(f"Processing query synchronously for session {session_id}")
         
@@ -193,8 +197,7 @@ class AgentGraphRunner:
                 {"sql_query": result.final_sql, "success": result.success}
             )
             
-            # Update session state
-            self.context_manager.update_session_state(session_id, final_state)
+            # Session state is managed by LangGraph's checkpointer
             
             if self.enable_monitoring:
                 self.monitor.end_execution(session_id, success=result.success)
@@ -226,38 +229,6 @@ class AgentGraphRunner:
                 debug_info={"error": str(e)}
             )
     
-    def run_sync(
-        self,
-        user_query: str,
-        session_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        channel_id: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None,
-        max_retries: int = 3
-    ) -> GraphExecutionResult:
-        """
-        Synchronous wrapper for process_query.
-        
-        Args:
-            user_query: User's natural language query
-            session_id: Session identifier
-            user_id: User identifier
-            channel_id: Channel identifier
-            context: Additional context
-            max_retries: Maximum number of retries
-            
-        Returns:
-            GraphExecutionResult with the processing outcome
-        """
-        return self.process_query(
-            user_query=user_query,
-            session_id=session_id,
-            user_id=user_id,
-            channel_id=channel_id,
-            context=context,
-            max_retries=max_retries
-        )
-    
     async def process_query_async(
         self,
         user_query: str,
@@ -268,7 +239,7 @@ class AgentGraphRunner:
         max_retries: int = 3
     ) -> GraphExecutionResult:
         """
-        Process a natural language query asynchronously.
+        Process a natural language query asynchronously using LangGraph's native ainvoke.
         
         Args:
             user_query: User's natural language query
@@ -282,7 +253,11 @@ class AgentGraphRunner:
             GraphExecutionResult with the processing outcome
         """
         if session_id is None:
-            session_id = self.context_manager.create_session()
+            session_id = self.context_manager.create_session(
+                user_id=user_id,
+                channel_id=channel_id,
+                metadata=context
+            )
         
         logger.info(f"Processing query asynchronously for session {session_id}")
         
@@ -315,53 +290,22 @@ class AgentGraphRunner:
             run_config = {
                 "configurable": {
                     "thread_id": session_id
-                }
+                },
+                "recursion_limit": 100
             }
             
-            # Execute the graph asynchronously with recursion limit
-            loop = asyncio.get_event_loop()
-            try:
-                # 재귀 제한 설정 (무한 루프 방지를 위해 100으로 증가)
-                run_config["recursion_limit"] = 100
-                final_state = await loop.run_in_executor(
-                    None,
-                    lambda: self.graph.invoke(initial_state, config=run_config)
-                )
-            except Exception as e:
-                logger.error(f"Graph execution failed: {str(e)}")
-                logger.error(f"Exception type: {type(e).__name__}")
-                logger.error(f"Exception details: {str(e)}", exc_info=True)
-                final_state = None
+            # Use LangGraph's native async invoke
+            final_state = await self.graph.ainvoke(initial_state, config=run_config)
             
             execution_time = time.time() - start_time
             
-            # Create result with safe final_state handling
-            try:
-                result = self._create_execution_result(
-                    session_id=session_id,
-                    final_state=final_state,
-                    execution_time=execution_time,
-                    user_query=user_query
-                )
-            except Exception as e:
-                logger.error(f"Failed to create execution result: {str(e)}")
-                logger.error(f"Final state type: {type(final_state)}")
-                logger.error(f"Final state value: {final_state}")
-                
-                # Create a safe fallback result
-                result = GraphExecutionResult(
-                    session_id=session_id,
-                    success=False,
-                    user_query=user_query,
-                    final_sql=None,
-                    query_result=[],
-                    data_summary=None,
-                    error_message=f"Failed to create execution result: {str(e)}",
-                    execution_time=execution_time,
-                    confidence_scores={},
-                    node_results=[],
-                    conversation_response=None
-                )
+            # Create result
+            result = self._create_execution_result(
+                session_id=session_id,
+                final_state=final_state,
+                execution_time=execution_time,
+                user_query=user_query
+            )
             
             # Add assistant message to conversation history
             summary = result.data_summary or "쿼리가 처리되었습니다."
@@ -371,8 +315,7 @@ class AgentGraphRunner:
                 {"sql_query": result.final_sql, "success": result.success}
             )
             
-            # Update session state
-            self.context_manager.update_session_state(session_id, final_state)
+            # Session state is managed by LangGraph's checkpointer
             
             if self.enable_monitoring:
                 self.monitor.end_execution(session_id, success=result.success)
@@ -428,7 +371,11 @@ class AgentGraphRunner:
             ExecutionProgress objects with current progress information
         """
         if session_id is None:
-            session_id = self.context_manager.create_session()
+            session_id = self.context_manager.create_session(
+                user_id=user_id,
+                channel_id=channel_id,
+                metadata=context
+            )
         
         logger.info(f"Streaming query execution for session {session_id}")
         
@@ -463,43 +410,29 @@ class AgentGraphRunner:
                 }
             }
             
-            # Stream the graph execution
-            node_order = [
-                "nlp_processing", "schema_mapping", "sql_generation",
-                "sql_validation", "sql_execution", "data_summarization"
-            ]
-            
+            # Stream the graph execution with improved progress tracking
             async for event in self.graph.astream(initial_state, config=run_config):
                 current_time = time.time()
                 elapsed_time = current_time - start_time
                 
-                # Determine current node and progress
+                # Determine current node from event
                 current_node = "unknown"
-                progress_percentage = 0.0
-                
                 if event:
-                    for node_name in node_order:
-                        if node_name in event:
-                            current_node = node_name
-                            progress_percentage = (node_order.index(node_name) + 1) / len(node_order) * 100
+                    # Get the first node name from the event
+                    for key in event.keys():
+                        if key not in ["__end__", "__start__"]:
+                            current_node = key
                             break
                 
-                # Estimate remaining time
-                if progress_percentage > 0:
-                    estimated_total = elapsed_time / (progress_percentage / 100)
-                    estimated_remaining = estimated_total - elapsed_time
-                else:
-                    estimated_remaining = None
-                
-                # Create progress update
+                # Create progress update (focus on current node and elapsed time)
                 progress = ExecutionProgress(
                     session_id=session_id,
                     current_node=current_node,
-                    progress_percentage=progress_percentage,
+                    progress_percentage=0.0,  # Accurate percentage is not feasible with conditional edges
                     elapsed_time=elapsed_time,
-                    estimated_remaining=estimated_remaining,
+                    estimated_remaining=None,  # Not accurate with dynamic paths
                     status="running",
-                    metadata={"event": event}
+                    metadata={"event": event, "note": "Progress percentage not available due to conditional execution paths"}
                 )
                 
                 yield progress
@@ -554,7 +487,7 @@ class AgentGraphRunner:
         execution_time: float,
         user_query: str
     ) -> GraphExecutionResult:
-        """Create execution result from final state."""
+        """Create execution result from final state using consistent dictionary access."""
         # Handle None or invalid final_state
         if final_state is None:
             return GraphExecutionResult(
@@ -571,43 +504,29 @@ class AgentGraphRunner:
                 debug_info={"error": "final_state is None"}
             )
         
-        # Convert node results to dictionaries
-        node_results = []
-        if hasattr(final_state, "get") and "node_results" in final_state:
-            for result in final_state["node_results"]:
-                if hasattr(result, 'to_dict'):
-                    node_results.append(result.to_dict())
-                else:
-                    node_results.append(result.__dict__ if hasattr(result, '__dict__') else str(result))
-        elif hasattr(final_state, "node_results") and final_state.node_results:
-            for result in final_state.node_results:
-                if hasattr(result, 'to_dict'):
-                    node_results.append(result.to_dict())
-                else:
-                    node_results.append(result.__dict__ if hasattr(result, '__dict__') else str(result))
-        
-        # Safe access to final_state attributes with None checks
+        # Safe access to final_state using consistent dictionary access
         try:
-            if hasattr(final_state, "get") and final_state is not None:
-                # Dictionary-like access
-                success = final_state.get("success", False)
-                final_sql = final_state.get("final_sql") or final_state.get("sql_query")
-                query_result = final_state.get("query_result", [])
-                data_summary = final_state.get("data_summary")
-                error_message = final_state.get("error_message")
-                confidence_scores = final_state.get("confidence_scores", {})
-                debug_info = final_state.get("debug_info", {})
-                conversation_response = final_state.get("conversation_response")
-            else:
-                # Object attribute access with safe defaults
-                success = getattr(final_state, "success", False) if final_state else False
-                final_sql = getattr(final_state, "final_sql", None) or getattr(final_state, "sql_query", None) if final_state else None
-                query_result = getattr(final_state, "query_result", []) if final_state else []
-                data_summary = getattr(final_state, "data_summary", None) if final_state else None
-                error_message = getattr(final_state, "error_message", None) if final_state else None
-                confidence_scores = getattr(final_state, "confidence_scores", {}) if final_state else {}
-                debug_info = getattr(final_state, "debug_info", {}) if final_state else {}
-                conversation_response = getattr(final_state, "conversation_response", None) if final_state else None
+            success = final_state.get("success", False)
+            final_sql = final_state.get("final_sql") or final_state.get("sql_query")
+            query_result = final_state.get("query_result", [])
+            data_summary = final_state.get("data_summary")
+            error_message = final_state.get("error_message")
+            confidence_scores = final_state.get("confidence_scores", {})
+            debug_info = final_state.get("debug_info", {})
+            conversation_response = final_state.get("conversation_response")
+            
+            # Process node_results safely
+            node_results_raw = final_state.get("node_results", [])
+            node_results_dict = []
+            for res in node_results_raw:
+                if hasattr(res, '__dict__'):  # dataclass or object
+                    node_results_dict.append(asdict(res) if hasattr(res, '__dataclass_fields__') else res.__dict__)
+                elif isinstance(res, dict):
+                    node_results_dict.append(res)
+                else:
+                    logger.warning(f"Unexpected type in node_results: {type(res)}")
+                    node_results_dict.append(str(res))  # Safe string conversion
+                    
         except Exception as e:
             logger.error(f"Error accessing final_state attributes: {str(e)}")
             # Fallback to safe defaults
@@ -619,6 +538,7 @@ class AgentGraphRunner:
             confidence_scores = {}
             debug_info = {"error": str(e)}
             conversation_response = None
+            node_results_dict = []
         
         return GraphExecutionResult(
             session_id=session_id,
@@ -630,7 +550,7 @@ class AgentGraphRunner:
             error_message=error_message,
             execution_time=execution_time,
             confidence_scores=confidence_scores,
-            node_results=node_results,
+            node_results=node_results_dict,
             debug_info=debug_info,
             conversation_response=conversation_response
         )

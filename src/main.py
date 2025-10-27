@@ -117,8 +117,9 @@ async def startup_event():
         db_manager = DatabaseManager()
         logger.info("Database manager initialized")
         
-        # Initialize learning system
+        # Initialize learning system and store in app state for dependency injection
         learning_system = AutoLearningSystem()
+        app.state.learning_system = learning_system
         logger.info("Auto learning system initialized")
         
         # Initialize Slack bot (optional - don't fail startup if Slack is not configured)
@@ -163,6 +164,26 @@ async def shutdown_event():
         logger.error(f"Error during shutdown: {e}", exc_info=True)
 
 
+# Dependency Injection Functions
+
+def get_learning_system(request: Request) -> AutoLearningSystem:
+    """
+    Dependency injection function for learning system.
+    
+    Args:
+        request: FastAPI request object
+        
+    Returns:
+        AutoLearningSystem instance
+        
+    Raises:
+        HTTPException: If learning system is not initialized
+    """
+    if not hasattr(request.app.state, "learning_system") or request.app.state.learning_system is None:
+        raise HTTPException(status_code=503, detail="Learning system not initialized")
+    return request.app.state.learning_system
+
+
 # API Routes
 
 @app.get("/")
@@ -202,24 +223,43 @@ async def health_check():
         from datetime import datetime
         health_status["timestamp"] = datetime.utcnow().isoformat()
         
-        # Check database connection
+        # Check database connection with actual ping
         if db_manager:
-            health_status["components"]["database"] = "connected"
+            try:
+                # 실제 DB 연결 테스트
+                from core.db import get_db_session
+                with get_db_session() as session:
+                    session.execute("SELECT 1")
+                health_status["components"]["database"] = "connected"
+            except Exception as db_error:
+                logger.warning(f"Database health check failed: {db_error}")
+                health_status["components"]["database"] = "disconnected"
         else:
             health_status["components"]["database"] = "disconnected"
         
-        # Check Slack app
+        # Check Slack app with actual API test
         if slack_app:
-            health_status["components"]["slack"] = "connected"
+            try:
+                # Slack API 연결 테스트
+                response = slack_app.client.auth_test()
+                if response["ok"]:
+                    health_status["components"]["slack"] = "connected"
+                else:
+                    health_status["components"]["slack"] = "disconnected"
+            except Exception as slack_error:
+                logger.warning(f"Slack health check failed: {slack_error}")
+                health_status["components"]["slack"] = "disconnected"
         else:
             health_status["components"]["slack"] = "disconnected"
         
-        # Overall status
-        all_healthy = all(
-            status == "connected" 
-            for status in health_status["components"].values()
-        )
-        health_status["status"] = "healthy" if all_healthy else "degraded"
+        # Overall status - DB는 필수, Slack은 선택적
+        db_healthy = health_status["components"]["database"] == "connected"
+        slack_healthy = health_status["components"]["slack"] == "connected"
+        
+        if db_healthy:
+            health_status["status"] = "healthy" if slack_healthy else "degraded"
+        else:
+            health_status["status"] = "unhealthy"
         
         return health_status
         
@@ -237,13 +277,10 @@ async def health_check():
 
 # Learning System API Endpoints
 @app.get("/learning/insights")
-async def get_learning_insights():
+async def get_learning_insights(ls: AutoLearningSystem = Depends(get_learning_system)):
     """Get learning system insights."""
     try:
-        if not learning_system:
-            raise HTTPException(status_code=503, detail="Learning system not initialized")
-        
-        insights = learning_system.get_learning_report()
+        insights = ls.get_learning_report()
         return {"status": "success", "data": insights}
     except Exception as e:
         logger.error(f"Failed to get learning insights: {str(e)}")
@@ -251,13 +288,10 @@ async def get_learning_insights():
 
 
 @app.get("/learning/performance")
-async def get_learning_performance():
+async def get_learning_performance(ls: AutoLearningSystem = Depends(get_learning_system)):
     """Get learning system performance metrics."""
     try:
-        if not learning_system:
-            raise HTTPException(status_code=503, detail="Learning system not initialized")
-        
-        metrics = learning_system.get_performance_metrics()
+        metrics = ls.get_performance_metrics()
         return {"status": "success", "data": metrics}
     except Exception as e:
         logger.error(f"Failed to get learning performance: {str(e)}")
@@ -265,13 +299,10 @@ async def get_learning_performance():
 
 
 @app.post("/learning/optimize")
-async def apply_learning_optimizations():
+async def apply_learning_optimizations(ls: AutoLearningSystem = Depends(get_learning_system)):
     """Apply learning-based optimizations."""
     try:
-        if not learning_system:
-            raise HTTPException(status_code=503, detail="Learning system not initialized")
-        
-        result = learning_system.apply_optimizations()
+        result = ls.apply_optimizations()
         return {"status": "success", "data": result}
     except Exception as e:
         logger.error(f"Failed to apply optimizations: {str(e)}")
@@ -279,13 +310,10 @@ async def apply_learning_optimizations():
 
 
 @app.get("/learning/optimization-status")
-async def get_optimization_status():
+async def get_optimization_status(ls: AutoLearningSystem = Depends(get_learning_system)):
     """Get current optimization status."""
     try:
-        if not learning_system:
-            raise HTTPException(status_code=503, detail="Learning system not initialized")
-        
-        status = learning_system.get_optimization_status()
+        status = ls.get_optimization_status()
         return {"status": "success", "data": status}
     except Exception as e:
         logger.error(f"Failed to get optimization status: {str(e)}")
@@ -293,13 +321,10 @@ async def get_optimization_status():
 
 
 @app.post("/learning/export")
-async def export_learning_data():
+async def export_learning_data(ls: AutoLearningSystem = Depends(get_learning_system)):
     """Export learning data."""
     try:
-        if not learning_system:
-            raise HTTPException(status_code=503, detail="Learning system not initialized")
-        
-        export_path = learning_system.export_learning_data()
+        export_path = ls.export_learning_data()
         return {"status": "success", "export_path": export_path}
     except Exception as e:
         logger.error(f"Failed to export learning data: {str(e)}")
@@ -307,13 +332,10 @@ async def export_learning_data():
 
 
 @app.post("/learning/force-save")
-async def force_save_learning_data():
+async def force_save_learning_data(ls: AutoLearningSystem = Depends(get_learning_system)):
     """Force save learning data."""
     try:
-        if not learning_system:
-            raise HTTPException(status_code=503, detail="Learning system not initialized")
-        
-        learning_system.force_save()
+        ls.force_save()
         return {"status": "success", "message": "Learning data saved successfully"}
     except Exception as e:
         logger.error(f"Failed to force save learning data: {str(e)}")
@@ -552,7 +574,7 @@ def main():
     # Import uvicorn here to avoid import issues
     import uvicorn
     
-    # Determine if reload should be enabled
+    # Determine if reload should be enabled@
     settings = get_settings()
     reload_enabled = args.reload or settings.debug
     
