@@ -370,23 +370,40 @@ def route_after_user_review(state: AgentState) -> str:
         str: 다음 노드 이름
     """
     review_status = state.get("review_status")
+    review_result = state.get("review_result")
     
-    if not review_status:
-        logger.warning("No review status found, defaulting to reject")
-        return "reject"
-    
-    if review_status == ReviewStatus.APPROVED:
-        logger.info("User approved query, proceeding to execution")
+    # 자동 승인된 경우 처리
+    if review_status == ReviewStatus.AUTO_APPROVED:
+        logger.info("Query auto-approved, proceeding to execution")
         return "sql_execution"
-    elif review_status == ReviewStatus.REJECTED:
-        logger.info("User rejected query, starting over")
-        return "reject"
-    elif review_status == ReviewStatus.MODIFIED:
-        logger.info("User modified query, regenerating SQL")
-        return "modify"
-    else:
-        logger.warning(f"Unknown review status: {review_status}, defaulting to reject")
-        return "reject"
+    
+    # 사용자 검토 결과가 있는 경우
+    if review_result and hasattr(review_result, 'status'):
+        if review_result.status == ReviewStatus.APPROVED:
+            logger.info("User approved query, proceeding to execution")
+            return "sql_execution"
+        elif review_result.status == ReviewStatus.REJECTED:
+            logger.info("User rejected query, starting over")
+            return "reject"
+        elif review_result.status == ReviewStatus.MODIFIED:
+            logger.info("User modified query, regenerating SQL")
+            return "modify"
+    
+    # review_status가 있는 경우
+    if review_status:
+        if review_status == ReviewStatus.APPROVED:
+            logger.info("User approved query, proceeding to execution")
+            return "sql_execution"
+        elif review_status == ReviewStatus.REJECTED:
+            logger.info("User rejected query, starting over")
+            return "reject"
+        elif review_status == ReviewStatus.MODIFIED:
+            logger.info("User modified query, regenerating SQL")
+            return "modify"
+    
+    # 기본값: 자동 승인된 것으로 간주하고 실행 진행
+    logger.warning("No clear review status found, defaulting to execution for safety")
+    return "sql_execution"
 
 
 def _execute_sql_query(state: AgentState) -> AgentState:

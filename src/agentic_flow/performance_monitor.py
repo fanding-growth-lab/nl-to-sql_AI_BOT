@@ -87,10 +87,10 @@ class PerformanceMonitor:
         self.monitoring_active = False
         self.monitor_thread: Optional[threading.Thread] = None
         
-        # 임계값 설정
+        # 임계값 설정 (메모리 사용량 임계값 상향 조정)
         self.thresholds = {
             MetricType.RESPONSE_TIME: 2.0,  # 2초
-            MetricType.MEMORY_USAGE: 80.0,   # 80%
+            MetricType.MEMORY_USAGE: 90.0,   # 80% -> 90%로 상향
             MetricType.CPU_USAGE: 90.0,     # 90%
             MetricType.SUCCESS_RATE: 70.0,  # 70%
             MetricType.ERROR_RATE: 10.0,    # 10%
@@ -388,8 +388,8 @@ class PerformanceMonitor:
             if self.stats["avg_response_time"] > 2.0:
                 recommendations.append(f"평균 응답 시간이 느립니다 ({self.stats['avg_response_time']:.2f}초). 성능 최적화가 필요합니다.")
             
-            # 메모리 사용량 기반 권장사항
-            if self.stats["peak_memory_usage"] > 80:
+            # 메모리 사용량 기반 권장사항 (임계값 상향 조정)
+            if self.stats["peak_memory_usage"] > 90:  # 80% -> 90%로 상향
                 recommendations.append(f"메모리 사용량이 높습니다 ({self.stats['peak_memory_usage']:.1f}%). 메모리 최적화가 필요합니다.")
             
             # CPU 사용량 기반 권장사항

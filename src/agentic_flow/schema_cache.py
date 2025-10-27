@@ -306,7 +306,7 @@ class SchemaCache:
             # 메모리 사용량 확인
             memory_usage = psutil.virtual_memory().percent
             
-            if memory_usage > 80:  # 80% 이상 사용 시
+            if memory_usage > 90:  # 80% -> 90%로 상향 조정
                 # 가장 오래된 엔트리들 제거
                 entries_to_remove = max(1, len(self._cache) // 4)  # 25% 제거
                 

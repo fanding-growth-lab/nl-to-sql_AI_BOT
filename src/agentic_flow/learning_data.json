@@ -253,10 +253,10 @@
     },
     "MONTH_4_MEMBER_QUERY_ACTION_COUNT": {
       "pattern": "4월 신규 회원 현황 알려줘.",
-      "frequency": 3,
+      "frequency": 7,
       "success_rate": 1.0,
-      "avg_confidence": 0.98,
-      "last_used": "2025-10-24T18:55:38.303967",
+      "avg_confidence": 0.9800000000000002,
+      "last_used": "2025-10-27T18:11:58.857126",
       "common_variations": [],
       "user_feedback": []
     },
@@ -349,7 +349,7 @@
         "6월_회원_활성_알려줘": 2,
         "6월": 2,
         "COUNT": 1,
-        "MONTH_4_MEMBER_QUERY_ACTION_COUNT": 3,
+        "MONTH_4_MEMBER_QUERY_ACTION_COUNT": 7,
         "MONTH_5_MEMBER_QUERY_ACTION_COUNT": 1
       },
       "time_patterns": {
@@ -363,18 +363,18 @@
         "09:00": 1,
         "10:00": 5,
         "11:00": 2,
-        "18:00": 4,
+        "18:00": 8,
         "19:00": 1
       },
-      "success_rate": 0.7407407407407407,
+      "success_rate": 0.7529411764705882,
       "feedback_history": []
     }
   },
   "learning_metrics": {
-    "total_queries": 92,
-    "successful_mappings": 67,
+    "total_queries": 96,
+    "successful_mappings": 71,
     "failed_mappings": 25,
-    "avg_confidence": 0.7055434782608699,
+    "avg_confidence": 0.7169791666666673,
     "most_common_patterns": [],
     "improvement_suggestions": []
   }

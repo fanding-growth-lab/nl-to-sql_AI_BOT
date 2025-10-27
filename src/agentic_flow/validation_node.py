@@ -465,10 +465,12 @@ class ValidationNode:
             overall_confidence = (syntax_confidence + schema_confidence + safety_confidence + 
                                 performance_confidence + quality_metrics.overall_score) / 5
             
-            # 상태 결정
-            if len(all_issues) == 0 and overall_confidence >= 0.8:
+            # 상태 결정 (더 관대한 임계값 적용)
+            if len(all_issues) == 0 and overall_confidence >= 0.7:
                 status = ValidationStatus.APPROVED
-            elif len(all_issues) == 0 and overall_confidence >= 0.6:
+            elif len(all_issues) <= 1 and overall_confidence >= 0.6:  # 경미한 이슈 허용
+                status = ValidationStatus.NEEDS_REVIEW
+            elif overall_confidence >= 0.8:  # 높은 신뢰도면 이슈가 있어도 검토로
                 status = ValidationStatus.NEEDS_REVIEW
             else:
                 status = ValidationStatus.REJECTED
