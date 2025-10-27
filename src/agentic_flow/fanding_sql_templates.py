@@ -68,7 +68,7 @@ class FandingSQLTemplates:
                 description="전체 회원 수 조회 (상태별 필터링 가능)",
                 sql_template="""
                 SELECT COUNT(*) as total_members
-                FROM t_member
+                FROM t_member_info
                 WHERE 1=1
                 """,
                 parameters=[],
@@ -76,20 +76,22 @@ class FandingSQLTemplates:
             ),
                    "active_member_count": SQLTemplate(
                        name="활성 회원 수",
-                       description="활성 상태 회원 수 조회",
-                       sql_template="SELECT COUNT(*) as active_members FROM t_member WHERE status = 'A'",
+                       description="활성 상태 회원 수 조회 (최근 로그인 기준)",
+                       sql_template="""
+                       SELECT COUNT(*) as active_members 
+                       FROM t_member_info 
+                       WHERE login_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                       """,
                        parameters=[],
                        analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
                    ),
                    "new_members_this_month": SQLTemplate(
                        name="이번 달 신규 회원",
-                       description="이번 달 신규 가입 회원 수 (로그인 로그 기반)",
+                       description="이번 달 신규 가입 회원 수",
                        sql_template="""
-                       SELECT COUNT(DISTINCT mll.member_no) as new_members_this_month 
-                       FROM t_member_login_log mll
-                       INNER JOIN t_member m ON mll.member_no = m.no
-                       WHERE DATE_FORMAT(mll.ins_datetime, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
-                       AND m.status = 'A'
+                       SELECT COUNT(*) as new_members_this_month 
+                       FROM t_member_info 
+                       WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
                        """,
                        parameters=[],
                        analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
@@ -97,13 +99,11 @@ class FandingSQLTemplates:
                    
                    "new_members_specific_month": SQLTemplate(
                        name="{month}월 신규 회원",
-                       description="{month}월 신규 가입 회원 수 (로그인 로그 기반)",
+                       description="{month}월 신규 가입 회원 수",
                        sql_template="""
-                       SELECT COUNT(DISTINCT mll.member_no) as new_members_{month}month 
-                       FROM t_member_login_log mll
-                       INNER JOIN t_member m ON mll.member_no = m.no
-                       WHERE DATE_FORMAT(mll.ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month:02d}')
-                       AND m.status = 'A'
+                       SELECT COUNT(*) as new_members_{month}month 
+                       FROM t_member_info 
+                       WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month:02d}')
                        """,
                        parameters=["month"],
                        analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
@@ -116,9 +116,9 @@ class FandingSQLTemplates:
                 SELECT 
                     DATE_FORMAT(ins_datetime, '%Y-%m') as month,
                     COUNT(*) as total_members,
-                    COUNT(CASE WHEN status = 'A' THEN 1 END) as active_members,
-                    ROUND(COUNT(CASE WHEN status = 'A' THEN 1 END) * 100.0 / COUNT(*), 2) as active_rate_percent
-                FROM t_member
+                    COUNT(CASE WHEN login_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 END) as active_members,
+                    ROUND(COUNT(CASE WHEN login_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 END) * 100.0 / COUNT(*), 2) as active_rate_percent
+                FROM t_member_info
                 WHERE ins_datetime >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
                 GROUP BY DATE_FORMAT(ins_datetime, '%Y-%m')
                 ORDER BY month
@@ -129,17 +129,17 @@ class FandingSQLTemplates:
             
             "member_retention": SQLTemplate(
                 name="회원 리텐션 분석",
-                description="회원 유지율 분석",
+                description="회원 유지율 분석 (팬딩 멤버십 기반)",
                 sql_template="""
                 SELECT 
-                    DATE_FORMAT(ins_datetime, '%Y-%m') as cohort_month,
-                    COUNT(*) as cohort_size,
-                    COUNT(CASE WHEN status = 'A' THEN 1 END) as active_members,
-                    COUNT(CASE WHEN status = 'J' THEN 1 END) as pending_members,
-                    ROUND(COUNT(CASE WHEN status = 'A' THEN 1 END) * 100.0 / COUNT(*), 2) as retention_rate
-                FROM t_member
-                WHERE ins_datetime >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-                GROUP BY DATE_FORMAT(ins_datetime, '%Y-%m')
+                    DATE_FORMAT(f.ins_datetime, '%Y-%m') as cohort_month,
+                    COUNT(DISTINCT f.member_no) as cohort_size,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'T' THEN f.member_no END) as active_members,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'F' THEN f.member_no END) as inactive_members,
+                    ROUND(COUNT(DISTINCT CASE WHEN f.fanding_status = 'T' THEN f.member_no END) * 100.0 / COUNT(DISTINCT f.member_no), 2) as retention_rate
+                FROM t_fanding f
+                WHERE f.ins_datetime >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                GROUP BY DATE_FORMAT(f.ins_datetime, '%Y-%m')
                 ORDER BY cohort_month
                 """,
                 parameters=[],
@@ -149,16 +149,22 @@ class FandingSQLTemplates:
             
             "subscription_duration_distribution": SQLTemplate(
                 name="멤버십 구독 기간 분포",
-                description="멤버십 구독 기간별 분포",
+                description="멤버십 구독 기간별 분포 (팬딩 로그 기반)",
                 sql_template="""
                 SELECT 
-                    '전체' as duration_range,
-                    COUNT(*) as member_count,
-                    100.0 as percentage
-                FROM t_member
-                WHERE status = 'A'
-                GROUP BY '전체'
-                ORDER BY member_count DESC
+                    CASE 
+                        WHEN DATEDIFF(end_date, start_date) <= 30 THEN '1개월 이하'
+                        WHEN DATEDIFF(end_date, start_date) <= 90 THEN '1-3개월'
+                        WHEN DATEDIFF(end_date, start_date) <= 180 THEN '3-6개월'
+                        WHEN DATEDIFF(end_date, start_date) <= 365 THEN '6-12개월'
+                        ELSE '12개월 이상'
+                    END as duration_range,
+                    COUNT(*) as subscription_count,
+                    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM t_fanding_log), 2) as percentage
+                FROM t_fanding_log
+                WHERE status = 'T'
+                GROUP BY duration_range
+                ORDER BY subscription_count DESC
                 """,
                 parameters=[],
                 analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
@@ -170,18 +176,19 @@ class FandingSQLTemplates:
         return {
             "monthly_revenue": SQLTemplate(
                 name="월간 매출 분석",
-                description="월간 매출 및 성장률 분석",
+                description="월간 매출 및 성장률 분석 (결제 정보 기반)",
                 sql_template="""
                 SELECT 
-                    DATE_FORMAT(ins_datetime, '%Y-%m') as month,
-                    SUM(price) as total_revenue,
+                    DATE_FORMAT(pay_datetime, '%Y-%m') as month,
+                    SUM(CASE WHEN currency_no = 1 THEN remain_price ELSE remain_price * 1360 END) as total_revenue_krw,
+                    SUM(CASE WHEN currency_no = 2 THEN remain_price ELSE remain_price / 1360 END) as total_revenue_usd,
                     COUNT(*) as transaction_count,
-                    AVG(price) as avg_transaction_value,
+                    AVG(CASE WHEN currency_no = 1 THEN remain_price ELSE remain_price * 1360 END) as avg_transaction_value_krw,
                     0 as prev_month_revenue,
                     0 as growth_rate_percent
                 FROM t_payment
-                WHERE 1=1
-                GROUP BY DATE_FORMAT(ins_datetime, '%Y-%m')
+                WHERE status IN ('T', 'P')
+                GROUP BY DATE_FORMAT(pay_datetime, '%Y-%m')
                 ORDER BY month
                 """,
                 parameters=[],
@@ -190,16 +197,17 @@ class FandingSQLTemplates:
             
             "visitor_trend": SQLTemplate(
                 name="방문자 수 추이",
-                description="일별 방문자 수 추이 분석",
+                description="일별 방문자 수 추이 분석 (로그인 기준)",
                 sql_template="""
                 SELECT 
-                    DATE(ins_datetime) as date,
+                    DATE(login_datetime) as date,
                     COUNT(DISTINCT member_no) as unique_visitors,
-                    COUNT(*) as total_visits,
+                    COUNT(*) as total_logins,
                     AVG(1) as avg_session_duration
-                FROM t_member_login_log
-                WHERE ins_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                GROUP BY DATE(ins_datetime)
+                FROM t_member_info
+                WHERE login_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                AND login_datetime IS NOT NULL
+                GROUP BY DATE(login_datetime)
                 ORDER BY date
                 """,
                 parameters=[],
@@ -208,16 +216,17 @@ class FandingSQLTemplates:
             
             "revenue_growth_analysis": SQLTemplate(
                 name="매출 성장률 분석",
-                description="전월 대비 매출 성장률 분석",
+                description="전월 대비 매출 성장률 분석 (결제 정보 기반)",
                 sql_template="""
                 SELECT 
-                    DATE_FORMAT(ins_datetime, '%Y-%m') as month,
-                    SUM(price) as revenue,
+                    DATE_FORMAT(pay_datetime, '%Y-%m') as month,
+                    SUM(CASE WHEN currency_no = 1 THEN remain_price ELSE remain_price * 1360 END) as revenue_krw,
                     0 as prev_month_revenue,
                     0 as growth_rate_percent
                 FROM t_payment
-                WHERE ins_datetime >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
-                GROUP BY DATE_FORMAT(ins_datetime, '%Y-%m')
+                WHERE pay_datetime >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+                AND status IN ('T', 'P')
+                GROUP BY DATE_FORMAT(pay_datetime, '%Y-%m')
                 ORDER BY month
                 """,
                 parameters=[],
@@ -233,17 +242,19 @@ class FandingSQLTemplates:
                 description="조회수 기준 인기 포스트 상위 {top_k}개",
                 sql_template="""
                 SELECT 
-                    p.no as post_id,
-                    p.title,
-                    p.ins_datetime as ins_datetime,
-                    p.view_count,
-                    p.like_count,
-                    0 as total_view_logs,
-                    0 as unique_viewers
-                FROM t_post p
-                WHERE p.ins_datetime >= DATE_SUB(NOW(), INTERVAL {days} DAY)
-                AND p.status != 'D'
-                ORDER BY p.view_count DESC
+                    c.no as post_id,
+                    c.content_type,
+                    c.ins_datetime as post_date,
+                    c.status,
+                    COUNT(cr.no) as reply_count,
+                    c.creator_no,
+                    c.member_no
+                FROM t_community c
+                LEFT JOIN t_community_reply cr ON c.no = cr.community_no
+                WHERE c.ins_datetime >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+                AND c.status = 'public'
+                GROUP BY c.no, c.content_type, c.ins_datetime, c.status, c.creator_no, c.member_no
+                ORDER BY reply_count DESC
                 LIMIT {top_k}
                 """,
                 parameters=["top_k", "days"],
@@ -252,19 +263,20 @@ class FandingSQLTemplates:
             
             "content_engagement_analysis": SQLTemplate(
                 name="콘텐츠 참여도 분석",
-                description="포스트별 참여도 지표 분석",
+                description="포스트별 참여도 지표 분석 (커뮤니티 기반)",
                 sql_template="""
                 SELECT 
-                    DATE_FORMAT(p.ins_datetime, '%Y-%m-%d') as post_date,
-                    COUNT(p.no) as posts_published,
-                    SUM(p.view_count) as total_views,
-                    SUM(p.like_count) as total_likes,
-                    0 as total_comments,
-                    ROUND(SUM(p.like_count) / NULLIF(SUM(p.view_count), 0) * 100, 2) as like_rate,
-                    0 as comment_rate
-                FROM t_post p
-                WHERE p.ins_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                GROUP BY DATE_FORMAT(p.ins_datetime, '%Y-%m-%d')
+                    DATE_FORMAT(c.ins_datetime, '%Y-%m-%d') as post_date,
+                    COUNT(c.no) as posts_published,
+                    COUNT(cr.no) as total_replies,
+                    COUNT(DISTINCT c.creator_no) as active_creators,
+                    COUNT(DISTINCT c.member_no) as active_members,
+                    ROUND(COUNT(cr.no) / NULLIF(COUNT(c.no), 0), 2) as avg_replies_per_post
+                FROM t_community c
+                LEFT JOIN t_community_reply cr ON c.no = cr.community_no
+                WHERE c.ins_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                AND c.status = 'public'
+                GROUP BY DATE_FORMAT(c.ins_datetime, '%Y-%m-%d')
                 ORDER BY post_date
                 """,
                 parameters=[],
@@ -277,13 +289,14 @@ class FandingSQLTemplates:
                 sql_template="""
                 WITH daily_metrics AS (
                     SELECT 
-                        DATE(p.ins_datetime) as date,
-                        COUNT(p.no) as posts_count,
-                        COUNT(DISTINCT ml.member_no) as unique_visitors
-                    FROM t_post p
-                    LEFT JOIN t_member_login_log ml ON DATE(p.ins_datetime) = DATE(ml.ins_datetime)
-                    WHERE p.ins_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                    GROUP BY DATE(p.ins_datetime)
+                        DATE(c.ins_datetime) as date,
+                        COUNT(c.no) as posts_count,
+                        COUNT(DISTINCT mi.member_no) as unique_visitors
+                    FROM t_community c
+                    LEFT JOIN t_member_info mi ON DATE(c.ins_datetime) = DATE(mi.login_datetime)
+                    WHERE c.ins_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                    AND c.status = 'public'
+                    GROUP BY DATE(c.ins_datetime)
                 )
                 SELECT 
                     date,
@@ -303,18 +316,21 @@ class FandingSQLTemplates:
         return {
             "customer_lifetime_analysis": SQLTemplate(
                 name="고객 평균 수명 분석",
-                description="고객 평균 수명 및 가치 분석",
+                description="고객 평균 수명 및 가치 분석 (팬딩 멤버십 기반)",
                 sql_template="""
                 SELECT 
-                    0 as avg_customer_age_days,
-                    0 as avg_active_duration_days,
-                    0 as avg_customer_value,
-                    COUNT(CASE WHEN status = 'A' THEN 1 END) as active_subscribers,
-                    COUNT(CASE WHEN status = 'D' THEN 1 END) as cancelled_subscribers,
+                    AVG(DATEDIFF(NOW(), mi.ins_datetime)) as avg_customer_age_days,
+                    AVG(DATEDIFF(fl.end_date, fl.start_date)) as avg_subscription_duration_days,
+                    AVG(fl.price) as avg_subscription_value,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'T' THEN f.member_no END) as active_subscribers,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'F' THEN f.member_no END) as cancelled_subscribers,
                     ROUND(
-                        COUNT(CASE WHEN status = 'A' THEN 1 END) * 100.0 / COUNT(*), 2
+                        COUNT(DISTINCT CASE WHEN f.fanding_status = 'T' THEN f.member_no END) * 100.0 / 
+                        COUNT(DISTINCT f.member_no), 2
                     ) as retention_rate
-                FROM t_member
+                FROM t_fanding f
+                LEFT JOIN t_member_info mi ON f.member_no = mi.member_no
+                LEFT JOIN t_fanding_log fl ON f.No = fl.fanding_no
                 WHERE 1=1
                 """,
                 parameters=[],
@@ -323,17 +339,18 @@ class FandingSQLTemplates:
             
             "cancellation_analysis": SQLTemplate(
                 name="멤버십 중단 예약 비율",
-                description="멤버십 중단 예약 현황 분석",
+                description="멤버십 중단 예약 현황 분석 (팬딩 상태 기반)",
                 sql_template="""
                 SELECT 
                     '전체' as subscription_plan,
-                    COUNT(*) as total_subscribers,
-                    COUNT(CASE WHEN status = 'D' THEN 1 END) as scheduled_cancellations,
+                    COUNT(DISTINCT f.member_no) as total_subscribers,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'F' THEN f.member_no END) as scheduled_cancellations,
                     ROUND(
-                        COUNT(CASE WHEN status = 'D' THEN 1 END) * 100.0 / COUNT(*), 2
+                        COUNT(DISTINCT CASE WHEN f.fanding_status = 'F' THEN f.member_no END) * 100.0 / 
+                        COUNT(DISTINCT f.member_no), 2
                     ) as cancellation_rate_percent
-                FROM t_member
-                WHERE status = 'A'
+                FROM t_fanding f
+                WHERE f.fanding_status = 'T'
                 GROUP BY '전체'
                 ORDER BY cancellation_rate_percent DESC
                 """,
@@ -343,22 +360,110 @@ class FandingSQLTemplates:
             
             "monthly_performance_comparison": SQLTemplate(
                 name="월별 성과 비교",
-                description="월별 성과 지표 비교 분석",
+                description="월별 성과 지표 비교 분석 (멤버십 및 매출 기반)",
                 sql_template="""
                 SELECT 
-                    DATE_FORMAT(ins_datetime, '%Y-%m') as month,
-                    COUNT(*) as new_members,
-                    SUM(CASE WHEN status = 'A' THEN 1 ELSE 0 END) as active_members,
-                    0 as total_revenue,
+                    DATE_FORMAT(f.ins_datetime, '%Y-%m') as month,
+                    COUNT(DISTINCT f.member_no) as new_members,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'T' THEN f.member_no END) as active_members,
+                    SUM(CASE WHEN p.currency_no = 1 THEN p.remain_price ELSE p.remain_price * 1360 END) as total_revenue_krw,
                     0 as prev_new_members,
                     0 as prev_active_members,
                     0 as prev_revenue,
                     0 as member_growth_rate,
                     0 as revenue_growth_rate
-                FROM t_member
-                WHERE ins_datetime >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-                GROUP BY DATE_FORMAT(ins_datetime, '%Y-%m')
+                FROM t_fanding f
+                LEFT JOIN t_payment p ON f.member_no = p.member_no 
+                    AND DATE_FORMAT(f.ins_datetime, '%Y-%m') = DATE_FORMAT(p.pay_datetime, '%Y-%m')
+                WHERE f.ins_datetime >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                GROUP BY DATE_FORMAT(f.ins_datetime, '%Y-%m')
                 ORDER BY month
+                """,
+                parameters=[],
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+            ),
+            
+            "creator_department_analysis": SQLTemplate(
+                name="크리에이터 부서별 분석",
+                description="크리에이터 부서별 성과 분석",
+                sql_template="""
+                SELECT 
+                    cd.name as department_name,
+                    COUNT(DISTINCT c.no) as total_creators,
+                    COUNT(DISTINCT f.member_no) as total_subscribers,
+                    COUNT(DISTINCT CASE WHEN f.fanding_status = 'T' THEN f.member_no END) as active_subscribers,
+                    SUM(CASE WHEN p.currency_no = 1 THEN p.remain_price ELSE p.remain_price * 1360 END) as total_revenue_krw
+                FROM t_creator_department cd
+                LEFT JOIN t_creator_department_mapping cdm ON cd.no = cdm.department_no
+                LEFT JOIN t_creator c ON cdm.creator_no = c.no
+                LEFT JOIN t_fanding f ON c.no = f.creator_no
+                LEFT JOIN t_payment p ON f.member_no = p.member_no
+                WHERE cd.no BETWEEN 3 AND 8  -- 엔터 그룹
+                GROUP BY cd.name
+                ORDER BY total_revenue_krw DESC
+                """,
+                parameters=[],
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+            ),
+            
+            "follow_analysis": SQLTemplate(
+                name="팔로우 분석",
+                description="크리에이터 팔로우 현황 분석",
+                sql_template="""
+                SELECT 
+                    c.no as creator_no,
+                    COUNT(DISTINCT f.member_no) as total_followers,
+                    COUNT(DISTINCT fan.member_no) as paying_subscribers,
+                    ROUND(COUNT(DISTINCT fan.member_no) * 100.0 / COUNT(DISTINCT f.member_no), 2) as conversion_rate
+                FROM t_creator c
+                LEFT JOIN t_follow f ON c.no = f.creator_no
+                LEFT JOIN t_fanding fan ON c.no = fan.creator_no AND fan.fanding_status = 'T'
+                GROUP BY c.no
+                ORDER BY total_followers DESC
+                LIMIT 10
+                """,
+                parameters=[],
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+            ),
+            
+            "review_analysis": SQLTemplate(
+                name="리뷰 분석",
+                description="크리에이터 리뷰 현황 분석",
+                sql_template="""
+                SELECT 
+                    r.creator_no,
+                    COUNT(r.no) as total_reviews,
+                    COUNT(DISTINCT r.member_no) as unique_reviewers,
+                    COUNT(DISTINCT r.fanding_log_no) as reviewed_subscriptions
+                FROM t_review r
+                WHERE r.ins_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                GROUP BY r.creator_no
+                ORDER BY total_reviews DESC
+                LIMIT 10
+                """,
+                parameters=[],
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+            ),
+            
+            "cancellation_survey_analysis": SQLTemplate(
+                name="멤버십 취소 설문 분석",
+                description="멤버십 취소 사유 분석",
+                sql_template="""
+                SELECT 
+                    CASE ssr.stop_survey_no
+                        WHEN 1 THEN '크리에이터 활동 부족'
+                        WHEN 2 THEN '리워드 불만족'
+                        WHEN 3 THEN '목표 달성'
+                        WHEN 4 THEN '가격 부담'
+                        WHEN 5 THEN '서비스 불만족'
+                        ELSE '기타'
+                    END as cancellation_reason,
+                    COUNT(*) as response_count,
+                    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM t_membership_stop_survey_response), 2) as percentage
+                FROM t_membership_stop_survey_response ssr
+                WHERE ssr.del_datetime IS NULL
+                GROUP BY ssr.stop_survey_no
+                ORDER BY response_count DESC
                 """,
                 parameters=[],
                 analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
@@ -567,7 +672,8 @@ class FandingSQLTemplates:
         # 고급 분석 관련 키워드
         advanced_keywords = [
             '수명', '생애', '가치', '중단', '취소', '예약', 
-            '비율', '분포', '트렌드', '상관관계'
+            '비율', '분포', '트렌드', '상관관계', '부서', '엔터',
+            '팔로우', '팔로워', '리뷰', '설문', '사유'
         ]
         
         # 키워드 매칭을 통한 템플릿 선택
@@ -628,7 +734,16 @@ class FandingSQLTemplates:
             if '수명' in query_lower or '생애' in query_lower or '가치' in query_lower:
                 return self.get_template("customer_lifetime_analysis")
             elif '중단' in query_lower or '취소' in query_lower:
-                return self.get_template("cancellation_analysis")
+                if '설문' in query_lower or '사유' in query_lower:
+                    return self.get_template("cancellation_survey_analysis")
+                else:
+                    return self.get_template("cancellation_analysis")
+            elif '부서' in query_lower or '엔터' in query_lower:
+                return self.get_template("creator_department_analysis")
+            elif '팔로우' in query_lower or '팔로워' in query_lower:
+                return self.get_template("follow_analysis")
+            elif '리뷰' in query_lower:
+                return self.get_template("review_analysis")
             elif '월별' in query_lower and '비교' in query_lower:
                 return self.get_template("monthly_performance_comparison")
             elif '성과' in query_lower and '비교' in query_lower:

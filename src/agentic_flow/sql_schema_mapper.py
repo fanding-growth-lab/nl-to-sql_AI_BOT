@@ -59,47 +59,66 @@ class SQLSchemaMapper:
         self.config = config
         self.logger = logging.getLogger(__name__)
         
-        # 컬럼 매핑 규칙
+        # 컬럼 매핑 규칙 (실제 DB 스키마 기반)
         self.column_mapping_rules = {
             # 날짜 관련 컬럼 매핑
             "created_at": ["ins_datetime", "created_date", "reg_date", "join_date", "signup_date"],
             "updated_at": ["modified_date", "update_date", "last_modified"],
-            "deleted_at": ["delete_date", "remove_date"],
+            "deleted_at": ["delete_date", "remove_date", "del_datetime"],
             
             # 상태 관련 컬럼 매핑
-            "status": ["state", "condition", "active_status"],
+            "status": ["fanding_status", "public_status", "state", "condition", "active_status"],
             "is_active": ["active", "enabled", "valid"],
             "is_deleted": ["deleted", "removed", "disabled"],
             
             # 사용자 관련 컬럼 매핑 (실제 DB 스키마 기반)
-            "user_id": ["no", "member_no"],
+            "user_id": ["member_no", "creator_no", "no"],
             "email": ["c_email"],
             "name": ["nickname"],
             "phone": ["phone_number", "mobile", "tel"],
             
             # 금액 관련 컬럼 매핑 (실제 DB 스키마 기반)
-            "amount": ["price", "heat"],
+            "amount": ["remain_price", "price", "heat"],
             "total": ["total_amount", "sum_amount"],
             "count": ["cnt", "num", "quantity"],
             
             # 추가 실제 컬럼들
             "view_count": ["view_count"],
             "like_count": ["like_count"],
-            "creator_no": ["creator_no"],
-            "member_no": ["member_no"]
+            "creator_no": ["creator_no", "seller_creator_no"],
+            "member_no": ["member_no"],
+            "department_no": ["department_no"],
+            "fanding_no": ["fanding_no"],
+            "community_no": ["community_no"],
+            "content_type": ["content_type"],
+            "currency_no": ["currency_no"],
+            "pay_datetime": ["pay_datetime"],
+            "start_date": ["start_date"],
+            "end_date": ["end_date"],
+            "edition": ["edition"],
+            "login_datetime": ["login_datetime"]
         }
         
         # 테이블 매핑 규칙 (실제 DB 스키마 기반)
         self.table_mapping_rules = {
-            "users": ["t_member"],
-            "members": ["t_member"],
+            "users": ["t_member_info"],
+            "members": ["t_member_info"],
             "creators": ["t_creator"],
-            "posts": ["t_post"],
+            "posts": ["t_community"],
             "payments": ["t_payment"],
             "projects": ["t_project"],
             "collections": ["t_collection"],
             "tiers": ["t_tier"],
-            "login_logs": ["t_member_login_log"]
+            "login_logs": ["t_member_info"],
+            "fanding": ["t_fanding"],
+            "fanding_logs": ["t_fanding_log"],
+            "follows": ["t_follow"],
+            "replies": ["t_community_reply"],
+            "reviews": ["t_review"],
+            "departments": ["t_creator_department"],
+            "department_mappings": ["t_creator_department_mapping"],
+            "surveys": ["t_membership_stop_survey_response"],
+            "survey_texts": ["t_membership_stop_survey_response_text"]
         }
     
     def map_sql_to_schema(self, sql_query: str, db_schema: Dict[str, Any], user_query: str = "") -> SQLMappingResult:
@@ -431,8 +450,11 @@ class SQLSchemaMapper:
     
     def _select_fallback_table(self, db_schema: Dict[str, Any]) -> str:
         """폴백 테이블 선택 (실제 존재하는 테이블 중에서)"""
-        # 우선순위 순서로 테이블 선택
-        priority_tables = ["t_member", "t_creator", "t_post", "t_payment", "t_project"]
+        # 우선순위 순서로 테이블 선택 (PDF 스키마 기반)
+        priority_tables = [
+            "t_member_info", "t_creator", "t_fanding", "t_fanding_log", 
+            "t_payment", "t_community", "t_follow", "t_review"
+        ]
         
         for table in priority_tables:
             if table in db_schema:
@@ -444,21 +466,21 @@ class SQLSchemaMapper:
             return available_tables[0]
         
         # 모든 테이블이 없으면 기본값
-        return "t_member"
+        return "t_member_info"
     
     def _select_fallback_column(self, table_name: str, db_schema: Dict[str, Any]) -> str:
         """폴백 컬럼 선택 (실제 존재하는 컬럼 중에서)"""
         if table_name not in db_schema:
-            return "no"
+            return "member_no"
         
         table_info = db_schema[table_name]
         columns = list(table_info.get("columns", {}).keys())
         
         if not columns:
-            return "no"
+            return "member_no"
         
-        # 우선순위 순서로 컬럼 선택
-        priority_columns = ["no", "status", "name", "title", "member_no", "creator_no"]
+        # 우선순위 순서로 컬럼 선택 (PDF 스키마 기반)
+        priority_columns = ["member_no", "creator_no", "no", "fanding_status", "ins_datetime", "status"]
         
         for col in priority_columns:
             if col in columns:
