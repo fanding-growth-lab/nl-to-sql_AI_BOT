@@ -31,6 +31,7 @@ class SQLTemplate:
     sql_template: str
     parameters: List[str]
     analysis_type: FandingAnalysisType
+    keywords: List[str] = None  # 키워드 기반 매칭을 위한 필드 추가
 
 
 class FandingSQLTemplates:
@@ -41,6 +42,9 @@ class FandingSQLTemplates:
         self.logger = logging.getLogger(__name__)
         # 중앙화된 스키마 정보 로드
         self.db_schema = get_cached_db_schema()
+        
+        # 템플릿 검증 실행 (중요: 스키마 동기화 확인)
+        self._validate_templates()
     
     def _initialize_templates(self) -> Dict[str, SQLTemplate]:
         """Initialize all Fanding SQL templates"""
@@ -72,8 +76,9 @@ class FandingSQLTemplates:
                 WHERE 1=1
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
-            ),
+                analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                keywords=["회원", "멤버", "맴버", "회원수", "멤버수", "맴버수", "전체", "모든", "사용자", "가입자"]
+                   ),
                    "active_member_count": SQLTemplate(
                        name="활성 회원 수",
                        description="활성 상태 회원 수 조회 (최근 로그인 기준)",
@@ -83,7 +88,8 @@ class FandingSQLTemplates:
                        WHERE login_datetime >= DATE_SUB(NOW(), INTERVAL 30 DAY)
                        """,
                        parameters=[],
-                       analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
+                       analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                       keywords=["활성", "회원", "멤버", "맴버", "활성회원", "활성멤버", "로그인", "최근"]
                    ),
                    "new_members_this_month": SQLTemplate(
                        name="이번 달 신규 회원",
@@ -94,7 +100,8 @@ class FandingSQLTemplates:
                        WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
                        """,
                        parameters=[],
-                       analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
+                       analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                       keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", "이번달", "이번"]
                    ),
                    
                    "new_members_specific_month": SQLTemplate(
@@ -106,7 +113,8 @@ class FandingSQLTemplates:
                        WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month:02d}')
                        """,
                        parameters=["month"],
-                       analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
+                       analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                       keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"]
                    ),
             
             "monthly_member_trend": SQLTemplate(
@@ -192,7 +200,8 @@ class FandingSQLTemplates:
                 ORDER BY month
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.PERFORMANCE_REPORT
+                analysis_type=FandingAnalysisType.PERFORMANCE_REPORT,
+                keywords=["월간", "매출", "수익", "revenue", "income", "월별", "매출분석", "수익분석", "결제", "payment"]
             ),
             
             "visitor_trend": SQLTemplate(
@@ -211,7 +220,8 @@ class FandingSQLTemplates:
                 ORDER BY date
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.PERFORMANCE_REPORT
+                analysis_type=FandingAnalysisType.PERFORMANCE_REPORT,
+                keywords=["방문자", "visitor", "추이", "trend", "일별", "daily", "로그인", "login", "방문", "visit"]
             ),
             
             "revenue_growth_analysis": SQLTemplate(
@@ -230,7 +240,8 @@ class FandingSQLTemplates:
                 ORDER BY month
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.PERFORMANCE_REPORT
+                analysis_type=FandingAnalysisType.PERFORMANCE_REPORT,
+                keywords=["매출", "성장률", "growth", "rate", "증가", "increase", "전월", "previous", "비교", "comparison"]
             )
         }
     
@@ -258,7 +269,8 @@ class FandingSQLTemplates:
                 LIMIT {top_k}
                 """,
                 parameters=["top_k", "days"],
-                analysis_type=FandingAnalysisType.CONTENT_PERFORMANCE
+                analysis_type=FandingAnalysisType.CONTENT_PERFORMANCE,
+                keywords=["인기", "포스트", "post", "top", "상위", "조회수", "view", "댓글", "reply", "커뮤니티", "community"]
             ),
             
             "content_engagement_analysis": SQLTemplate(
@@ -280,7 +292,8 @@ class FandingSQLTemplates:
                 ORDER BY post_date
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.CONTENT_PERFORMANCE
+                analysis_type=FandingAnalysisType.CONTENT_PERFORMANCE,
+                keywords=["콘텐츠", "content", "참여도", "engagement", "포스트", "post", "댓글", "reply", "크리에이터", "creator"]
             ),
             
             "post_visitor_correlation": SQLTemplate(
@@ -307,7 +320,8 @@ class FandingSQLTemplates:
                 ORDER BY date
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.CONTENT_PERFORMANCE
+                analysis_type=FandingAnalysisType.CONTENT_PERFORMANCE,
+                keywords=["포스트", "post", "발행", "publish", "방문자", "visitor", "상관관계", "correlation", "관계", "relation"]
             )
         }
     
@@ -334,7 +348,8 @@ class FandingSQLTemplates:
                 WHERE 1=1
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["고객", "customer", "평균", "average", "수명", "lifetime", "ltv", "가치", "value", "분석", "analysis", "멤버십", "membership"]
             ),
             
             "cancellation_analysis": SQLTemplate(
@@ -355,7 +370,8 @@ class FandingSQLTemplates:
                 ORDER BY cancellation_rate_percent DESC
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["멤버십", "membership", "중단", "cancellation", "예약", "scheduled", "비율", "rate", "취소", "cancel"]
             ),
             
             "monthly_performance_comparison": SQLTemplate(
@@ -380,7 +396,8 @@ class FandingSQLTemplates:
                 ORDER BY month
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["월별", "monthly", "성과", "performance", "비교", "comparison", "지표", "metrics", "분석", "analysis"]
             ),
             
             "creator_department_analysis": SQLTemplate(
@@ -403,7 +420,8 @@ class FandingSQLTemplates:
                 ORDER BY total_revenue_krw DESC
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["크리에이터", "creator", "부서", "department", "분석", "analysis", "성과", "performance", "부서별"]
             ),
             
             "follow_analysis": SQLTemplate(
@@ -423,7 +441,8 @@ class FandingSQLTemplates:
                 LIMIT 10
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["팔로우", "follow", "분석", "analysis", "크리에이터", "creator", "현황", "status", "구독자", "subscriber"]
             ),
             
             "review_analysis": SQLTemplate(
@@ -442,7 +461,8 @@ class FandingSQLTemplates:
                 LIMIT 10
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["리뷰", "review", "분석", "analysis", "크리에이터", "creator", "현황", "status", "평가", "rating"]
             ),
             
             "cancellation_survey_analysis": SQLTemplate(
@@ -466,7 +486,8 @@ class FandingSQLTemplates:
                 ORDER BY response_count DESC
                 """,
                 parameters=[],
-                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS
+                analysis_type=FandingAnalysisType.ADVANCED_ANALYSIS,
+                keywords=["멤버십", "membership", "취소", "cancellation", "설문", "survey", "분석", "analysis", "사유", "reason"]
             )
         }
     
@@ -623,155 +644,108 @@ class FandingSQLTemplates:
 어떤 정보가 필요하신지 구체적으로 말씀해주세요! 😊"""
 
     def match_query_to_template(self, query: str) -> Optional[SQLTemplate]:
-        """Match natural language query to appropriate SQL template with parameter extraction"""
+        """
+        자연어 쿼리를 적절한 SQL 템플릿에 매칭 (키워드 기반 점수 매칭)
+        
+        Args:
+            query: 사용자 쿼리
+            
+        Returns:
+            매칭된 SQLTemplate 또는 None
+        """
         query_lower = query.lower()
         
         # 파라미터 추출
         extracted_params = self._extract_parameters_from_query(query)
         
-        # 1단계: 가장 간단한 쿼리부터 처리
-        simple_queries = [
-            ('전체 회원 수', 'member_count'),
-            ('전체 회원', 'member_count'),
-            ('모든 회원', 'member_count'),
-            ('활성 회원 수', 'active_member_count'),
-            ('활성 회원', 'active_member_count'),
-            ('활성회원수', 'active_member_count'),  # 띄어쓰기 없는 버전
-            ('활성회원', 'active_member_count'),   # 띄어쓰기 없는 버전
-            ('이번 달 신규 회원', 'new_members_this_month'),
-            ('이번 달 신규', 'new_members_this_month'),
-            ('회원 수', 'member_count'),  # 기본값
-            ('멤버 수', 'member_count'),
-            ('맴버 수', 'member_count'),
-            ('사용자 수', 'member_count'),
-            ('가입자 수', 'member_count')
-        ]
+        # 키워드 기반 점수 매칭
+        best_template = self._find_best_template_by_keywords(query_lower, extracted_params)
         
-        for keyword, template_name in simple_queries:
-            if keyword in query_lower:
-                return self.get_template(template_name)
+        return best_template
+    
+    def _find_best_template_by_keywords(self, query_lower: str, extracted_params: Dict[str, Any]) -> Optional[SQLTemplate]:
+        """
+        키워드 기반 점수 매칭으로 최적의 템플릿 찾기
         
-        # 멤버십 데이터 관련 키워드
-        membership_keywords = [
-            '회원', '멤버', '맴버', '멤버십', '맴버쉽', '가입자', '사용자', '리텐션', '유지율', 
-            '구독', '기간', '분포', '추이', '증감'
-        ]
-        
-        # 성과 리포트 관련 키워드
-        performance_keywords = [
-            '매출', '수익', '매출액', '성장률', '방문자', '방문', 
-            '수익률', '성과', '실적', '전월', '대비'
-        ]
-        
-        # 콘텐츠 성과 관련 키워드
-        content_keywords = [
-            '포스트', '게시글', '콘텐츠', '조회', '조회수', '인기', 
-            '상위', '순위', '참여', '댓글', '좋아요'
-        ]
-        
-        # 고급 분석 관련 키워드
-        advanced_keywords = [
-            '수명', '생애', '가치', '중단', '취소', '예약', 
-            '비율', '분포', '트렌드', '상관관계', '부서', '엔터',
-            '팔로우', '팔로워', '리뷰', '설문', '사유'
-        ]
-        
-        # 키워드 매칭을 통한 템플릿 선택
-        if any(keyword in query_lower for keyword in membership_keywords):
-            # 신규 회원 관련 특별 처리 (월별 키워드 포함)
-            if '신규' in query_lower or '새로운' in query_lower:
-                # 특정 월 신규 회원 조회 (4월, 5월 등)
-                month_match = re.search(r'(\d+)월', query_lower)
-                if month_match:
-                    month = int(month_match.group(1))
-                    if 1 <= month <= 12:
-                        return self.get_parameterized_template("new_members_specific_month", {"month": month})
-                # 이번 달 신규 회원
-                elif '이번 달' in query_lower or '이번달' in query_lower or '이번 월' in query_lower:
-                    return self.get_template("new_members_this_month")
-                # 기본 신규 회원 (이번 달)
-                else:
-                    return self.get_template("new_members_this_month")
+        Args:
+            query_lower: 소문자로 변환된 쿼리
+            extracted_params: 추출된 파라미터
             
-            # 월별 멤버십 성과 관련 처리 (동적 처리)
-            elif any(month in query_lower for month in ['1월', '2월', '3월', '4월', '5월', '6월', 
-                                                     '7월', '8월', '9월', '10월', '11월', '12월']):
-                # 동적 월별 템플릿 생성
-                dynamic_template = self.create_dynamic_monthly_template(query)
-                if dynamic_template:
-                    return dynamic_template
-            # 멤버십 성과 관련 특별 처리 (월별 키워드 포함)
-            elif ('멤버십' in query_lower or '맴버쉽' in query_lower) and ('성과' in query_lower or '실적' in query_lower or '분석' in query_lower):
-                return self.get_template("monthly_member_trend")  # 기본 월별 멤버십 성과
-            elif '회원 수' in query_lower or '전체 회원' in query_lower:
-                return self.get_template("member_count")
-            elif '월별' in query_lower or '추이' in query_lower:
-                return self.get_template("monthly_member_trend")
-            elif '리텐션' in query_lower or '유지율' in query_lower:
-                return self.get_template("member_retention")
-            elif '구독 기간' in query_lower or '분포' in query_lower:
-                return self.get_template("subscription_duration_distribution")
+        Returns:
+            최고 점수를 받은 템플릿 또는 None
+        """
+        template_scores = []
         
-        elif any(keyword in query_lower for keyword in performance_keywords):
-            if '매출' in query_lower and '현황' in query_lower:
-                return self.get_template("monthly_revenue")
-            elif '매출' in query_lower and '월간' in query_lower:
-                return self.get_template("monthly_revenue")
-            elif '방문자' in query_lower or '방문' in query_lower:
-                return self.get_template("visitor_trend")
-            elif '성장률' in query_lower or '증감' in query_lower:
-                return self.get_template("revenue_growth_analysis")
-        
-        elif any(keyword in query_lower for keyword in content_keywords):
-            if '인기' in query_lower or 'top' in query_lower or '상위' in query_lower:
-                return self.get_template("top_posts")
-            elif '참여' in query_lower or '댓글' in query_lower or '좋아요' in query_lower:
-                return self.get_template("content_engagement_analysis")
-            elif '상관관계' in query_lower or '관계' in query_lower:
-                return self.get_template("post_visitor_correlation")
-        
-        elif any(keyword in query_lower for keyword in advanced_keywords):
-            if '수명' in query_lower or '생애' in query_lower or '가치' in query_lower:
-                return self.get_template("customer_lifetime_analysis")
-            elif '중단' in query_lower or '취소' in query_lower:
-                if '설문' in query_lower or '사유' in query_lower:
-                    return self.get_template("cancellation_survey_analysis")
-                else:
-                    return self.get_template("cancellation_analysis")
-            elif '부서' in query_lower or '엔터' in query_lower:
-                return self.get_template("creator_department_analysis")
-            elif '팔로우' in query_lower or '팔로워' in query_lower:
-                return self.get_template("follow_analysis")
-            elif '리뷰' in query_lower:
-                return self.get_template("review_analysis")
-            elif '월별' in query_lower and '비교' in query_lower:
-                return self.get_template("monthly_performance_comparison")
-            elif '성과' in query_lower and '비교' in query_lower:
-                return self.get_template("monthly_performance_comparison")
-            elif '최근' in query_lower and '성과' in query_lower:
-                return self.get_template("monthly_performance_comparison")
-            elif '기간' in query_lower and '분포' in query_lower:
-                return self.get_template("subscription_duration_distribution")
-        
-        # 추가 매칭 로직
-        if '취소' in query_lower or '중단' in query_lower:
-            return self.get_template("cancellation_analysis")
-        elif '월별' in query_lower and '비교' in query_lower:
-            template = self.get_template("monthly_performance_comparison")
-        elif '최근' in query_lower and ('성과' in query_lower or '비교' in query_lower):
-            template = self.get_template("monthly_performance_comparison")
-        else:
-            template = None
-        
-        # 동적 연도 처리 적용
-        if template:
-            template = self._apply_dynamic_year_to_template(query, template)
+        for template_name, template in self.templates.items():
+            if not template.keywords:
+                continue
+                
+            # 키워드 매칭 점수 계산
+            score = self._calculate_keyword_score(query_lower, template.keywords)
             
-            # 파라미터화된 템플릿 적용
+            if score > 0:
+                template_scores.append((template, score, template_name))
+        
+        if not template_scores:
+            return None
+        
+        # 점수순으로 정렬하여 최고 점수 템플릿 선택
+        template_scores.sort(key=lambda x: x[1], reverse=True)
+        best_template, best_score, best_name = template_scores[0]
+        
+        # 최소 임계점 이상인 경우만 반환
+        if best_score >= 0.3:  # 30% 이상 매칭
+            self.logger.debug(f"키워드 매칭: '{best_name}' (점수: {best_score:.2f})")
+            
+            # 파라미터가 있으면 적용
             if extracted_params:
-                template = self.get_parameterized_template(template.name, extracted_params)
+                return self.get_parameterized_template(best_name, extracted_params)
+        else:
+                return best_template
         
-        return template
+        return None
+    
+    def _calculate_keyword_score(self, query_lower: str, template_keywords: List[str]) -> float:
+        """
+        쿼리와 템플릿 키워드 간의 매칭 점수 계산 (Jaccard 유사도 기반)
+        
+        Args:
+            query_lower: 소문자로 변환된 쿼리
+            template_keywords: 템플릿의 키워드 리스트
+            
+        Returns:
+            매칭 점수 (0.0 ~ 1.0)
+        """
+        if not template_keywords:
+            return 0.0
+        
+        # 쿼리에서 키워드 추출 (간단한 토큰화)
+        query_words = set(query_lower.split())
+        
+        # 템플릿 키워드를 소문자로 변환
+        template_words = set([kw.lower() for kw in template_keywords])
+        
+        # 교집합과 합집합 계산
+        intersection = query_words.intersection(template_words)
+        union = query_words.union(template_words)
+        
+        if not union:
+            return 0.0
+        
+        # Jaccard 유사도 계산
+        jaccard_score = len(intersection) / len(union)
+        
+        # 추가 가중치: 정확한 키워드 매칭에 더 높은 점수
+        exact_matches = len(intersection)
+        total_template_keywords = len(template_keywords)
+        
+        # 정확한 매칭 비율
+        exact_match_ratio = exact_matches / total_template_keywords if total_template_keywords > 0 else 0
+        
+        # 최종 점수: Jaccard 유사도와 정확한 매칭 비율의 가중 평균
+        final_score = (jaccard_score * 0.7) + (exact_match_ratio * 0.3)
+        
+        return min(final_score, 1.0)  # 최대 1.0으로 제한
     
     def _apply_dynamic_year_to_template(self, query: str, template: SQLTemplate) -> SQLTemplate:
         """템플릿에 동적 연도 처리 적용"""
@@ -837,21 +811,32 @@ class FandingSQLTemplates:
         return formatted_result
     
     def create_dynamic_monthly_template(self, query: str) -> Optional[SQLTemplate]:
-        """동적으로 월별 멤버십 성과 템플릿 생성"""
+        """
+        동적으로 월별 멤버십 성과 템플릿 생성 (개선된 날짜 처리)
+        
+        Args:
+            query: 사용자 쿼리
+            
+        Returns:
+            생성된 SQLTemplate 또는 None
+        """
         try:
             from .date_utils import DateUtils
             
-            # 쿼리에서 월 추출
-            month = DateUtils.extract_month_from_query(query)
-            if not month:
+            # 쿼리에서 월 추출 (개선된 날짜 처리)
+            month_info = DateUtils.extract_month_with_year_from_query(query)
+            if not month_info:
                 return None
                 
-            # 월을 두 자리 숫자로 변환 (예: "9월" -> "09")
-            month_num = month.split('-')[1] if '-' in month else month
-            if len(month_num) == 1:
-                month_num = f"0{month_num}"
+            year, month = month_info
             
-            # 동적 SQL 템플릿 생성 (조인을 활용한 월별 필터링)
+            # 월을 두 자리 숫자로 변환
+            month_num = f"{month:02d}"
+            
+            # 정확한 YYYY-MM 형식 생성
+            yyyy_mm = f"{year}-{month_num}"
+            
+            # 동적 SQL 템플릿 생성 (개선된 날짜 필터링)
             sql_template = f"""
             SELECT 
                 '{month_num}월' as analysis_month,
@@ -864,18 +849,19 @@ class FandingSQLTemplates:
                 ROUND(COUNT(DISTINCT CASE WHEN m.status = 'D' THEN m.no END) * 100.0 / COUNT(DISTINCT m.no), 2) as deletion_rate_percent
             FROM t_member m
             LEFT JOIN t_member_login_log l ON m.no = l.member_no
-            WHERE DATE_FORMAT(l.ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month_num}')
+            WHERE DATE_FORMAT(l.ins_datetime, '%Y-%m') = '{yyyy_mm}'
             """
             
             return SQLTemplate(
                 name=f"{month_num}월 멤버십 성과 분석",
-                description=f"{month_num}월 멤버십 성과 상세 분석",
+                description=f"{month_num}월 멤버십 성과 상세 분석 ({year}년 데이터)",
                 sql_template=sql_template,
                 parameters=[],
-                analysis_type=FandingAnalysisType.MEMBERSHIP_DATA
+                analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                keywords=["멤버십", "맴버쉽", "성과", "실적", "분석", f"{month}월", f"{month_num}월"]
             )
         except Exception as e:
-            print(f"동적 월별 템플릿 생성 실패: {str(e)}")
+            self.logger.error(f"동적 월별 템플릿 생성 실패: {str(e)}")
             return None
 
     def get_schema_info(self, query: str) -> Optional[str]:
@@ -1019,3 +1005,143 @@ class FandingSQLTemplates:
                 break
         
         return params
+
+    def _validate_templates(self) -> None:
+        """
+        템플릿과 실제 DB 스키마 간의 동기화 검증
+        
+        모든 템플릿의 SQL에서 사용된 테이블과 컬럼명이 실제 DB 스키마에 존재하는지 확인합니다.
+        존재하지 않는 테이블/컬럼이 발견되면 심각한 오류 로그를 기록합니다.
+        """
+        validation_errors = []
+        validation_warnings = []
+        
+        self.logger.info("템플릿 스키마 검증을 시작합니다...")
+        
+        for template_name, template in self.templates.items():
+            try:
+                # SQL 템플릿에서 테이블명과 컬럼명 추출
+                sql_content = template.sql_template.lower()
+                
+                # 테이블명 추출 (FROM, JOIN 절에서)
+                table_names = self._extract_table_names_from_sql(sql_content)
+                
+                # 각 테이블에 대해 검증
+                for table_name in table_names:
+                    if table_name not in self.db_schema:
+                        error_msg = f"Template '{template_name}' uses invalid table: '{table_name}'"
+                        validation_errors.append(error_msg)
+                        self.logger.error(error_msg)
+                        continue
+                    
+                    # 테이블이 존재하면 컬럼명 검증
+                    table_info = self.db_schema[table_name]
+                    table_columns = set(table_info.get("columns", {}).keys())
+                    
+                    # SQL에서 사용된 컬럼명 추출
+                    column_names = self._extract_column_names_from_sql(sql_content, table_name)
+                    
+                    for column_name in column_names:
+                        if column_name not in table_columns:
+                            error_msg = f"Template '{template_name}' uses invalid column '{column_name}' in table '{table_name}'"
+                            validation_errors.append(error_msg)
+                            self.logger.error(error_msg)
+                
+                # 템플릿 파라미터 검증
+                if template.parameters:
+                    for param in template.parameters:
+                        if f"{{{param}}}" not in template.sql_template:
+                            warning_msg = f"Template '{template_name}' declares parameter '{param}' but doesn't use it in SQL"
+                            validation_warnings.append(warning_msg)
+                            self.logger.warning(warning_msg)
+                
+            except Exception as e:
+                error_msg = f"Template '{template_name}' validation failed: {str(e)}"
+                validation_errors.append(error_msg)
+                self.logger.error(error_msg)
+        
+        # 검증 결과 요약
+        if validation_errors:
+            self.logger.error(f"템플릿 검증 실패: {len(validation_errors)}개 오류 발견")
+            self.logger.error("발견된 오류들:")
+            for error in validation_errors:
+                self.logger.error(f"  - {error}")
+        else:
+            self.logger.info(f"템플릿 검증 성공: {len(self.templates)}개 템플릿 모두 유효")
+        
+        if validation_warnings:
+            self.logger.warning(f"템플릿 검증 경고: {len(validation_warnings)}개 경고 발견")
+            for warning in validation_warnings:
+                self.logger.warning(f"  - {warning}")
+    
+    def _extract_table_names_from_sql(self, sql_content: str) -> List[str]:
+        """
+        SQL 쿼리에서 테이블명 추출 (CTE 제외)
+        
+        Args:
+            sql_content: SQL 쿼리 문자열 (소문자)
+            
+        Returns:
+            추출된 테이블명 리스트 (CTE 제외)
+        """
+        import re
+        
+        table_names = []
+        
+        # CTE 이름들을 먼저 추출하여 제외
+        cte_names = set()
+        cte_pattern = r'with\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+as\s*\('
+        cte_matches = re.findall(cte_pattern, sql_content)
+        cte_names.update(cte_matches)
+        
+        # FROM 절에서 테이블명 추출
+        from_pattern = r'from\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        from_matches = re.findall(from_pattern, sql_content)
+        table_names.extend(from_matches)
+        
+        # JOIN 절에서 테이블명 추출
+        join_pattern = r'join\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        join_matches = re.findall(join_pattern, sql_content)
+        table_names.extend(join_matches)
+        
+        # LEFT JOIN, RIGHT JOIN, INNER JOIN 등도 처리
+        left_join_pattern = r'left\s+join\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        left_join_matches = re.findall(left_join_pattern, sql_content)
+        table_names.extend(left_join_matches)
+        
+        right_join_pattern = r'right\s+join\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        right_join_matches = re.findall(right_join_pattern, sql_content)
+        table_names.extend(right_join_matches)
+        
+        inner_join_pattern = r'inner\s+join\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        inner_join_matches = re.findall(inner_join_pattern, sql_content)
+        table_names.extend(inner_join_matches)
+        
+        # CTE 이름들을 제외하고 중복 제거
+        filtered_names = [name for name in table_names if name not in cte_names]
+        return list(set(filtered_names))
+    
+    def _extract_column_names_from_sql(self, sql_content: str, table_name: str) -> List[str]:
+        """
+        SQL 쿼리에서 특정 테이블의 컬럼명 추출
+        
+        Args:
+            sql_content: SQL 쿼리 문자열 (소문자)
+            table_name: 검증할 테이블명
+            
+        Returns:
+            추출된 컬럼명 리스트
+        """
+        import re
+        
+        column_names = []
+        
+        # 테이블명.컬럼명 패턴 추출
+        table_column_pattern = rf'{table_name}\.([a-zA-Z_][a-zA-Z0-9_]*)'
+        matches = re.findall(table_column_pattern, sql_content)
+        column_names.extend(matches)
+        
+        # WHERE 절에서 직접 사용된 컬럼명 추출 (테이블명 없이)
+        # 단, 이는 더 복잡한 로직이 필요하므로 일단 테이블명.컬럼명 패턴만 처리
+        
+        return list(set(column_names))

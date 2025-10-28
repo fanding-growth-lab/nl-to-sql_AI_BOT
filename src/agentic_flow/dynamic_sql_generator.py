@@ -14,7 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 
 from .nodes import BaseNode
-from .date_utils import DateUtils
+# Removed: from .date_utils import DateUtils (deleted module)
 
 
 @dataclass
@@ -390,12 +390,27 @@ JSON 형식으로만 응답:
         }
     
     def extract_month_from_query(self, query: str) -> Optional[str]:
-        """쿼리에서 월 추출 (DateUtils 사용)"""
-        return DateUtils.extract_month_from_query(query)
+        """쿼리에서 월 추출 (DateUtils 대체 구현)"""
+        # Simple month extraction without DateUtils
+        import re
+        month_patterns = {
+            r'(\d+)월': r'\1',
+            r'(\d+)월달': r'\1',
+            r'(\d+)월분': r'\1'
+        }
+        
+        for pattern, replacement in month_patterns.items():
+            match = re.search(pattern, query)
+            if match:
+                month = match.group(1)
+                if 1 <= int(month) <= 12:
+                    return month.zfill(2)  # 01, 02, etc.
+        
+        return None
     
     def generate_membership_performance_sql(self, query: str) -> str:
         """멤버십 성과 분석 SQL 생성"""
-        month = DateUtils.get_analysis_month(query)
+        month = self.extract_month_from_query(query)  # Use our own method
         
         return f"""
         SELECT 

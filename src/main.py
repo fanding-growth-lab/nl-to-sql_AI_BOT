@@ -9,6 +9,7 @@ import os
 import sys
 import argparse
 import logging
+import time
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,8 @@ from core.logging import get_logger
 from core.db import DatabaseManager
 from slack.bot import create_slack_bot, get_bot_status
 from agentic_flow.auto_learning_system import AutoLearningSystem
+from agentic_flow.statistics_reporting import get_reporter, get_visualization_generator, ReportConfig
+from agentic_flow.intent_classification_stats import get_stats_collector
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -498,7 +501,214 @@ async def debug_config():
         "config": settings.get_masked_settings(),
         "environment": settings.get_environment(),
         "required_settings": settings.validate_required_settings()
-    }
+        }
+
+
+# === Statistics API Endpoints ===
+
+@app.get("/stats/classification/summary")
+async def get_classification_summary():
+    """
+    Get summary of intent classification statistics.
+    
+    Returns:
+        Basic classification statistics including total counts, averages, and distributions
+    """
+    try:
+        stats_collector = get_stats_collector()
+        stats = stats_collector.get_stats()
+        
+        return {
+            "total_classifications": stats.total_classifications,
+            "average_confidence": stats.average_confidence,
+            "intent_distribution": stats.intent_distribution,
+            "error_rate": stats.error_rate,
+            "response_times": {
+                "min": stats.response_times.min,
+                "max": stats.response_times.max,
+                "avg": stats.response_times.avg
+            },
+            "last_updated": stats.last_updated
+        }
+    except Exception as e:
+        logger.error(f"Failed to get classification summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/classification/report")
+async def get_classification_report(
+    include_trends: bool = True,
+    include_performance_metrics: bool = True,
+    include_error_analysis: bool = True,
+    include_confidence_distribution: bool = True,
+    include_response_time_analysis: bool = True,
+    time_range_hours: int = 24
+):
+    """
+    Generate comprehensive classification statistics report.
+    
+    Args:
+        include_trends: Include trend analysis
+        include_performance_metrics: Include performance insights
+        include_error_analysis: Include error analysis
+        include_confidence_distribution: Include confidence distribution
+        include_response_time_analysis: Include response time analysis
+        time_range_hours: Time range for analysis in hours
+    
+    Returns:
+        Comprehensive statistics report
+    """
+    try:
+        reporter = get_reporter()
+        config = ReportConfig(
+            include_trends=include_trends,
+            include_performance_metrics=include_performance_metrics,
+            include_error_analysis=include_error_analysis,
+            include_confidence_distribution=include_confidence_distribution,
+            include_response_time_analysis=include_response_time_analysis,
+            time_range_hours=time_range_hours
+        )
+        
+        report = reporter.generate_comprehensive_report(config)
+        return report
+    except Exception as e:
+        logger.error(f"Failed to generate classification report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/classification/dashboard")
+async def get_classification_dashboard():
+    """
+    Get real-time dashboard data for intent classification.
+    
+    Returns:
+        Real-time metrics and system status for dashboard display
+    """
+    try:
+        reporter = get_reporter()
+        dashboard_data = reporter.generate_real_time_dashboard_data()
+        return dashboard_data
+    except Exception as e:
+        logger.error(f"Failed to get dashboard data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/classification/export")
+async def export_classification_data(
+    format: str = "json",
+    time_range_hours: int = 24
+):
+    """
+    Export classification statistics data.
+    
+    Args:
+        format: Export format (json or csv)
+        time_range_hours: Time range for export in hours
+    
+    Returns:
+        Exported classification data
+    """
+    try:
+        reporter = get_reporter()
+        export_data = reporter.export_statistics_data(format=format, time_range_hours=time_range_hours)
+        return export_data
+    except Exception as e:
+        logger.error(f"Failed to export classification data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/classification/charts/{chart_type}")
+async def get_classification_chart_data(
+    chart_type: str,
+    time_range_hours: int = 24
+):
+    """
+    Get chart data for visualization.
+    
+    Args:
+        chart_type: Type of chart (confidence_trend, response_time_trend, intent_distribution, error_rate_trend)
+        time_range_hours: Time range for chart data in hours
+    
+    Returns:
+        Chart data for visualization
+    """
+    try:
+        viz_generator = get_visualization_generator()
+        chart_data = viz_generator.generate_chart_data(chart_type, time_range_hours)
+        return chart_data
+    except Exception as e:
+        logger.error(f"Failed to get chart data for {chart_type}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/stats/classification/reset")
+async def reset_classification_stats():
+    """
+    Reset classification statistics (admin only).
+    
+    Returns:
+        Success message
+    """
+    try:
+        stats_collector = get_stats_collector()
+        stats_collector.reset_stats()
+        
+        logger.info("Classification statistics reset")
+        return {"message": "Classification statistics have been reset successfully"}
+    except Exception as e:
+        logger.error(f"Failed to reset classification stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/system/health")
+async def get_system_health():
+    """
+    Get system health status including statistics system status.
+    
+    Returns:
+        System health information
+    """
+    try:
+        # Basic system health
+        health_status = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "components": {
+                "database": "healthy" if db_manager and db_manager.is_connected() else "unhealthy",
+                "slack_app": "healthy" if slack_app else "unhealthy",
+                "learning_system": "healthy" if learning_system else "unhealthy"
+            }
+        }
+        
+        # Statistics system health
+        try:
+            stats_collector = get_stats_collector()
+            stats = stats_collector.get_stats()
+            
+            health_status["components"]["statistics_system"] = "healthy"
+            health_status["statistics"] = {
+                "total_classifications": stats.total_classifications,
+                "uptime_hours": (time.time() - stats.start_time) / 3600 if stats.start_time > 0 else 0,
+                "last_activity": stats.last_updated
+            }
+        except Exception as e:
+            health_status["components"]["statistics_system"] = "unhealthy"
+            health_status["statistics_error"] = str(e)
+        
+        # Overall health determination
+        unhealthy_components = [
+            comp for comp, status in health_status["components"].items() 
+            if status == "unhealthy"
+        ]
+        
+        if unhealthy_components:
+            health_status["status"] = "degraded"
+            health_status["unhealthy_components"] = unhealthy_components
+        
+        return health_status
+    except Exception as e:
+        logger.error(f"Failed to get system health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/debug/bot-status")

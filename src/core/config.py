@@ -117,6 +117,11 @@ class LLMConfig(BaseSettings):
     temperature: float = Field(default=0.1)
     max_tokens: int = Field(default=2048)
     
+    # Intent classification specific settings
+    intent_model: str = Field(default="gemini-2.5-flash")
+    intent_temperature: float = Field(default=0.1)
+    intent_max_tokens: int = Field(default=256)
+    
     def __init__(self, **kwargs):
         # Load environment variables before initialization
         load_env_variables()

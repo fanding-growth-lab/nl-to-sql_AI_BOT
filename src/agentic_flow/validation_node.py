@@ -227,30 +227,53 @@ class ValidationNode:
             # 컬럼명 추출
             column_names = self._extract_column_names(sql_query)
             
-            # 실제 스키마와 비교
-            valid_tables = [
-                "t_member", "t_fanding", "t_creator", "t_payment", "t_project", "t_tier",
-                "t_post", "t_post_view_log", "t_post_like_log", "t_post_reply",
-                "t_collection", "t_community", "t_course", "t_product", "t_review"
-            ]
-            # 실제 존재하는 컬럼들
-            valid_columns = [
-                "no", "id", "name", "title", "content", "status", "amount", "type", 
-                "email", "phone", "address", "member_no", "creator_no", "post_no",
-                "view_count", "like_count", "ins_datetime", "mod_datetime", "del_datetime"
-            ]
-            
+            # 실제 스키마와 비교 (동적으로 로드)
+            try:
+                from core.db import get_cached_db_schema
+                db_schema = get_cached_db_schema()
+                valid_tables = list(db_schema.keys())
+            except Exception:
+                # 폴백: 기본 테이블 목록
+                valid_tables = [
+                    "t_member", "t_member_info", "t_member_login_log", "t_fanding", "t_creator", 
+                    "t_payment", "t_project", "t_tier", "t_post", "t_post_view_log", 
+                    "t_post_like_log", "t_post_reply", "t_collection", "t_community", 
+                    "t_course", "t_product", "t_review", "t_fanding_log", "t_follow",
+                    "t_creator_department", "t_creator_department_mapping", "t_tier_log"
+                ]
             # 테이블명 검증
             for table in table_names:
                 if table not in valid_tables:
                     issues.append(f"존재하지 않는 테이블: {table}")
                     suggestions.append(f"사용 가능한 테이블: {', '.join(valid_tables)}")
             
-            # 컬럼명 검증 (간단한 패턴 매칭)
+            # 컬럼명 검증 (실제 스키마 기반)
             for column in column_names:
-                if not any(valid_col in column.lower() for valid_col in valid_columns):
-                    warnings.append(f"의심스러운 컬럼명: {column}")
-                    suggestions.append("컬럼명을 다시 확인하세요")
+                column_found = False
+                for table in table_names:
+                    if table in db_schema:
+                        # 스키마 구조: db_schema[table]["columns"]는 딕셔너리
+                        table_columns = list(db_schema[table]["columns"].keys())
+                        if column in table_columns:
+                            column_found = True
+                            break
+                
+                if not column_found:
+                    # 테이블별로 컬럼 확인
+                    table_column_info = []
+                    for table in table_names:
+                        if table in db_schema:
+                            table_columns = list(db_schema[table]["columns"].keys())
+                            table_column_info.append(f"{table}: {', '.join(table_columns[:5])}...")
+                    
+                    # 정확한 오류 메시지 생성
+                    if len(table_names) == 1:
+                        issues.append(f"Column '{column}' not found in {table_names[0]} table")
+                    else:
+                        issues.append(f"Column '{column}' not found in any of the tables: {', '.join(table_names)}")
+                    
+                    if table_column_info:
+                        suggestions.append(f"Available columns: {'; '.join(table_column_info)}")
             
             # 조인 조건 검증
             if "JOIN" in sql_query.upper():
@@ -552,18 +575,76 @@ class ValidationNode:
             return []
     
     def _extract_column_names(self, sql_query: str) -> List[str]:
-        """SQL에서 컬럼명 추출"""
+        """SQL에서 컬럼명 추출 (SQL 함수와 키워드 제외)"""
         try:
-            # SELECT 절에서 컬럼명 추출
+            # SQL 함수와 키워드 목록
+            sql_functions = {
+                'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'DISTINCT', 'AS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+                'DATE_FORMAT', 'YEAR', 'MONTH', 'DAY', 'NOW', 'CURDATE', 'CURTIME', 'CONCAT', 'SUBSTRING',
+                'UPPER', 'LOWER', 'TRIM', 'LENGTH', 'ROUND', 'FLOOR', 'CEIL', 'ABS', 'MOD', 'POWER',
+                'IF', 'IFNULL', 'COALESCE', 'NULLIF', 'CAST', 'CONVERT', 'GROUP_CONCAT', 'HAVING',
+                'ORDER', 'BY', 'ASC', 'DESC', 'LIMIT', 'OFFSET', 'WHERE', 'AND', 'OR', 'NOT', 'IN',
+                'BETWEEN', 'LIKE', 'IS', 'NULL', 'EXISTS', 'ALL', 'ANY', 'SOME', 'UNION', 'INTERSECT',
+                'EXCEPT', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'OUTER', 'ON', 'USING', 'NATURAL',
+                'SELECT', 'FROM', 'INSERT', 'UPDATE', 'DELETE', 'INTO', 'VALUES', 'SET'
+            }
+            
+            # SQL 함수 내부의 문자열/숫자 제외
+            sql_string_patterns = [
+                r"'[^']*'",  # 작은따옴표 문자열
+                r'"[^"]*"',  # 큰따옴표 문자열
+                r'`[^`]*`',  # 백틱 문자열
+                r'\b\d+\b',  # 숫자
+                r'%[a-zA-Z]', # 포맷 문자열 (%Y, %m 등)
+            ]
+            
+            # 문자열과 포맷 문자열 제거
+            cleaned_sql = sql_query
+            for pattern in sql_string_patterns:
+                cleaned_sql = re.sub(pattern, '', cleaned_sql)
+            
+            # SELECT 절에서 컬럼명 추출 (정리된 SQL 사용)
             select_pattern = r'SELECT\s+(.*?)\s+FROM'
-            select_match = re.search(select_pattern, sql_query, re.IGNORECASE | re.DOTALL)
+            select_match = re.search(select_pattern, cleaned_sql, re.IGNORECASE | re.DOTALL)
             
             if select_match:
                 select_clause = select_match.group(1)
-                # 간단한 컬럼명 추출 (복잡한 경우는 제외)
-                column_pattern = r'([a-zA-Z_][a-zA-Z0-9_]*)'
-                columns = re.findall(column_pattern, select_clause)
-                return columns
+                # 컬럼명 패턴 (테이블.컬럼 또는 컬럼명)
+                column_pattern = r'([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?)'
+                potential_columns = re.findall(column_pattern, select_clause)
+                
+                # SQL 함수와 키워드 제외
+                actual_columns = []
+                for col in potential_columns:
+                    # 테이블.컬럼 형태에서 컬럼명만 추출
+                    if '.' in col:
+                        table_col = col.split('.')
+                        if len(table_col) == 2:
+                            actual_columns.append(table_col[1])  # 컬럼명만 추가
+                    else:
+                        # 단순 컬럼명인 경우 SQL 함수가 아닌지 확인
+                        if col.upper() not in sql_functions:
+                            # AS 별칭 제외 (AS 뒤에 오는 것들)
+                            if col.lower() not in ['new_members', 'total', 'count', 'sum', 'avg']:
+                                actual_columns.append(col)
+                
+                # WHERE 절에서도 컬럼명 추출 (정리된 SQL 사용)
+                where_pattern = r'WHERE\s+(.*?)(?:\s+ORDER|\s+GROUP|\s+LIMIT|$)'
+                where_match = re.search(where_pattern, cleaned_sql, re.IGNORECASE | re.DOTALL)
+                
+                if where_match:
+                    where_clause = where_match.group(1)
+                    where_columns = re.findall(column_pattern, where_clause)
+                    for col in where_columns:
+                        if '.' in col:
+                            table_col = col.split('.')
+                            if len(table_col) == 2:
+                                actual_columns.append(table_col[1])
+                        else:
+                            if col.upper() not in sql_functions:
+                                actual_columns.append(col)
+                
+                return actual_columns
             
             return []
             

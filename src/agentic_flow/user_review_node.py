@@ -107,6 +107,9 @@ class UserReviewNode:
             # 검토 요청을 대기 목록에 추가
             self.pending_reviews[review_request.query_id] = review_request
             
+            # Slack으로 간단한 검토 요청 전송
+            self._send_simple_review_request(review_request, state)
+            
             logger.info(f"Review request created: {review_request.query_id}")
             logger.info(f"Pending reviews count: {len(self.pending_reviews)}")
             
@@ -207,6 +210,53 @@ class UserReviewNode:
         except Exception as e:
             logger.error(f"Data preview generation failed: {str(e)}")
             return []
+    
+    def _send_simple_review_request(self, review_request: UserReviewRequest, state: Dict[str, Any]):
+        """
+        간단한 채팅 방식으로 검토 요청 전송
+        
+        Args:
+            review_request: 검토 요청 객체
+            state: 현재 상태
+        """
+        try:
+            # 사용자 ID와 채널 ID 가져오기
+            user_id = state.get("user_id")
+            channel_id = state.get("channel_id")
+            
+            if not user_id or not channel_id:
+                logger.warning("User ID or Channel ID not found, cannot send review request")
+                return
+            
+            # 간단한 검토 요청 메시지 생성
+            review_message = self._create_simple_review_message(review_request)
+            
+            # 상태에 검토 메시지 저장 (실제 Slack 전송은 별도 처리)
+            state["review_message"] = review_message
+            state["review_needs_response"] = True
+            
+            logger.info(f"Review request prepared for Slack - User: {user_id}, Channel: {channel_id}")
+            logger.info(f"Review message: {review_message}")
+            
+        except Exception as e:
+            logger.error(f"Failed to prepare review request: {str(e)}")
+    
+    def _create_simple_review_message(self, review_request: UserReviewRequest) -> str:
+        """간단한 검토 요청 메시지 생성"""
+        return f"""🔍 *쿼리 검토가 필요합니다*
+
+*질문:* {review_request.user_query}
+*신뢰도:* {review_request.confidence:.2f}
+
+*생성된 SQL:*
+```sql
+{review_request.sql_query}
+```
+
+이 쿼리를 실행할까요?
+• `네` - 실행
+• `아니오` - 취소  
+• `수정: [새로운 질문]` - 다른 질문으로 변경"""
     
     def submit_user_review(self, query_id: str, status: ReviewStatus, 
                           feedback: Optional[str] = None, modified_sql: Optional[str] = None) -> bool:

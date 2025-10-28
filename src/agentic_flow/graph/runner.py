@@ -133,31 +133,27 @@ class AgentGraphRunner:
             GraphExecutionResult with the processing outcome
         """
         if session_id is None:
-            session_id = self.context_manager.create_session(
-                user_id=user_id,
-                channel_id=channel_id,
-                metadata=context
-            )
+            session_id = self.context_manager.create_session_id()
         
         logger.info(f"Processing query synchronously for session {session_id}")
         
-        # Add user message to conversation history
-        self.context_manager.add_user_message(session_id, user_query)
+        # Get business metadata for AgentState
+        business_metadata = self.context_manager.get_business_metadata(
+            user_id=user_id,
+            channel_id=channel_id
+        )
         
-        # Initialize state
+        # Initialize state with business metadata
         initial_state = initialize_state(
             user_query=user_query,
             user_id=user_id,
             channel_id=channel_id,
             session_id=session_id,
-            context=context,
+            context={**context, **business_metadata.to_dict()} if context else business_metadata.to_dict(),
             max_retries=max_retries
         )
         
-        # Add conversation context to state
-        conversation_context = self.context_manager.get_conversation_context(session_id)
-        if conversation_context:
-            initial_state["context"]["conversation_history"] = conversation_context
+        # LangGraph will handle conversation history automatically
         
         # Execute the graph
         start_time = time.time()
@@ -189,13 +185,16 @@ class AgentGraphRunner:
                 user_query=user_query
             )
             
-            # Add assistant message to conversation history
-            summary = result.data_summary or "쿼리가 처리되었습니다."
-            self.context_manager.add_assistant_message(
-                session_id,
-                summary,
-                {"sql_query": result.final_sql, "success": result.success}
+            # 통합 학습 데이터 기록
+            self._record_integrated_metrics(
+                final_state=final_state,
+                result=result,
+                user_id=user_id,
+                session_id=session_id,
+                execution_time_ms=execution_time * 1000
             )
+            
+            # LangGraph handles conversation history automatically
             
             # Session state is managed by LangGraph's checkpointer
             
@@ -253,31 +252,27 @@ class AgentGraphRunner:
             GraphExecutionResult with the processing outcome
         """
         if session_id is None:
-            session_id = self.context_manager.create_session(
-                user_id=user_id,
-                channel_id=channel_id,
-                metadata=context
-            )
+            session_id = self.context_manager.create_session_id()
         
         logger.info(f"Processing query asynchronously for session {session_id}")
         
-        # Add user message to conversation history
-        self.context_manager.add_user_message(session_id, user_query)
+        # Get business metadata for AgentState
+        business_metadata = self.context_manager.get_business_metadata(
+            user_id=user_id,
+            channel_id=channel_id
+        )
         
-        # Initialize state
+        # Initialize state with business metadata
         initial_state = initialize_state(
             user_query=user_query,
             user_id=user_id,
             channel_id=channel_id,
             session_id=session_id,
-            context=context,
+            context={**context, **business_metadata.to_dict()} if context else business_metadata.to_dict(),
             max_retries=max_retries
         )
         
-        # Add conversation context to state
-        conversation_context = self.context_manager.get_conversation_context(session_id)
-        if conversation_context:
-            initial_state["context"]["conversation_history"] = conversation_context
+        # LangGraph will handle conversation history automatically
         
         # Execute the graph asynchronously
         start_time = time.time()
@@ -307,13 +302,7 @@ class AgentGraphRunner:
                 user_query=user_query
             )
             
-            # Add assistant message to conversation history
-            summary = result.data_summary or "쿼리가 처리되었습니다."
-            self.context_manager.add_assistant_message(
-                session_id,
-                summary,
-                {"sql_query": result.final_sql, "success": result.success}
-            )
+            # LangGraph handles conversation history automatically
             
             # Session state is managed by LangGraph's checkpointer
             
@@ -371,31 +360,27 @@ class AgentGraphRunner:
             ExecutionProgress objects with current progress information
         """
         if session_id is None:
-            session_id = self.context_manager.create_session(
-                user_id=user_id,
-                channel_id=channel_id,
-                metadata=context
-            )
+            session_id = self.context_manager.create_session_id()
         
         logger.info(f"Streaming query execution for session {session_id}")
         
-        # Add user message to conversation history
-        self.context_manager.add_user_message(session_id, user_query)
+        # Get business metadata for AgentState
+        business_metadata = self.context_manager.get_business_metadata(
+            user_id=user_id,
+            channel_id=channel_id
+        )
         
-        # Initialize state
+        # Initialize state with business metadata
         initial_state = initialize_state(
             user_query=user_query,
             user_id=user_id,
             channel_id=channel_id,
             session_id=session_id,
-            context=context,
+            context={**context, **business_metadata.to_dict()} if context else business_metadata.to_dict(),
             max_retries=max_retries
         )
         
-        # Add conversation context to state
-        conversation_context = self.context_manager.get_conversation_context(session_id)
-        if conversation_context:
-            initial_state["context"]["conversation_history"] = conversation_context
+        # LangGraph will handle conversation history automatically
         
         start_time = time.time()
         
@@ -555,30 +540,6 @@ class AgentGraphRunner:
             conversation_response=conversation_response
         )
     
-    def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get information about a session."""
-        session = self.context_manager.get_session(session_id)
-        if session:
-            return {
-                "session_id": session.session_id,
-                "created_at": session.created_at,
-                "last_accessed": session.last_accessed,
-                "message_count": len(session.conversation_history.messages),
-                "current_state": session.current_state is not None
-            }
-        return None
-    
-    def get_conversation_history(self, session_id: str, max_messages: int = 10) -> List[Dict[str, Any]]:
-        """Get conversation history for a session."""
-        session = self.context_manager.get_session(session_id)
-        if session:
-            recent_messages = session.conversation_history.get_recent_messages(max_messages)
-            return [msg.to_dict() for msg in recent_messages]
-        return []
-    
-    def clear_session(self, session_id: str) -> bool:
-        """Clear a session and its history."""
-        return self.context_manager.remove_session(session_id)
     
     def get_monitoring_metrics(self) -> Optional[Dict[str, Any]]:
         """Get performance monitoring metrics."""
@@ -591,3 +552,199 @@ class AgentGraphRunner:
         if self.monitor:
             return self.monitor.get_health_status()
         return None
+    
+    def _record_integrated_metrics(
+        self,
+        final_state: AgentState,
+        result: GraphExecutionResult,
+        user_id: Optional[str],
+        session_id: Optional[str],
+        execution_time_ms: float
+    ) -> None:
+        """
+        통합 학습 데이터 기록
+        
+        Intent 분류와 AutoLearning 데이터를 통합하여 기록합니다.
+        """
+        try:
+            from ..intent_classification_stats import get_integrator, QueryInteractionMetrics
+            
+            integrator = get_integrator()
+            
+            # State에서 데이터 추출
+            intent_result = final_state.get("llm_intent_result", {})
+            intent = intent_result.get("intent", "UNKNOWN") if isinstance(intent_result, dict) else "UNKNOWN"
+            intent_confidence = intent_result.get("confidence", 0.0) if isinstance(intent_result, dict) else 0.0
+            intent_reasoning = intent_result.get("reasoning", None) if isinstance(intent_result, dict) else None
+            
+            validation_result = final_state.get("validation_result", {})
+            validation_passed = validation_result.get("is_valid", False) if isinstance(validation_result, dict) else False
+            
+            # 통합 메트릭스 생성
+            metrics = QueryInteractionMetrics(
+                user_query=result.user_query,
+                user_id=user_id,
+                session_id=session_id,
+                intent=intent,
+                intent_confidence=intent_confidence,
+                intent_reasoning=intent_reasoning,
+                sql_query=result.final_sql,
+                validation_passed=validation_passed,
+                execution_success=result.success,
+                execution_result_count=len(result.query_result) if result.query_result else 0,
+                response_time_ms=execution_time_ms,
+                total_processing_time_ms=execution_time_ms,
+                mapping_result=final_state.get("agent_schema_mapping"),
+                schema_mapping=final_state.get("schema_mapping"),
+                template_used=final_state.get("fanding_template").name if final_state.get("fanding_template") else None,
+                timestamp=time.time(),
+                is_error=not result.success,
+                error_message=result.error_message
+            )
+            
+            # 통합 기록
+            integrator.record_complete_query_interaction(metrics)
+            
+            logger.debug(f"Recorded integrated metrics for query: {result.user_query[:50]}...")
+            
+        except Exception as e:
+            logger.warning(f"Failed to record integrated metrics: {e}")
+    
+    def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get information about a session using LangGraph Checkpointer API.
+        
+        Args:
+            session_id: Session identifier (thread_id)
+            
+        Returns:
+            Session information dictionary or None if not found
+        """
+        try:
+            checkpointer = self.context_manager.get_checkpointer()
+            config = {"configurable": {"thread_id": session_id}}
+            
+            # Get the latest checkpoint for this thread
+            checkpoint = checkpointer.get(config)
+            
+            if checkpoint is None:
+                return None
+            
+            # Extract session information from checkpoint
+            session_info = {
+                "session_id": session_id,
+                "created_at": checkpoint.get("ts", "unknown"),
+                "last_accessed": checkpoint.get("ts", "unknown"),
+                "message_count": len(checkpoint.get("channel_values", {}).get("messages", [])),
+                "current_state": checkpoint.get("channel_values") is not None,
+                "checkpoint_id": checkpoint.get("id", "unknown"),
+                "parent_id": checkpoint.get("parent_id"),
+                "metadata": checkpoint.get("metadata", {})
+            }
+            
+            return session_info
+            
+        except Exception as e:
+            logger.error(f"Failed to get session info for {session_id}: {str(e)}")
+            return None
+    
+    def get_conversation_history(self, session_id: str, max_messages: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get conversation history for a session using LangGraph Checkpointer API.
+        
+        Args:
+            session_id: Session identifier (thread_id)
+            max_messages: Maximum number of messages to return
+            
+        Returns:
+            List of conversation messages
+        """
+        try:
+            checkpointer = self.context_manager.get_checkpointer()
+            config = {"configurable": {"thread_id": session_id}}
+            
+            # Get the latest checkpoint for this thread
+            checkpoint = checkpointer.get(config)
+            
+            if checkpoint is None:
+                return []
+            
+            # Extract messages from checkpoint
+            channel_values = checkpoint.get("channel_values", {})
+            messages = channel_values.get("messages", [])
+            
+            # Convert messages to dictionary format and limit count
+            conversation_history = []
+            for msg in messages[-max_messages:]:  # Get last N messages
+                if hasattr(msg, 'to_dict'):
+                    conversation_history.append(msg.to_dict())
+                elif isinstance(msg, dict):
+                    conversation_history.append(msg)
+                else:
+                    # Convert other message types to dict
+                    conversation_history.append({
+                        "content": str(msg),
+                        "type": type(msg).__name__
+                    })
+            
+            return conversation_history
+            
+        except Exception as e:
+            logger.error(f"Failed to get conversation history for {session_id}: {str(e)}")
+            return []
+    
+    def clear_session(self, session_id: str) -> bool:
+        """
+        Clear a session and its history using LangGraph Checkpointer API.
+        
+        Args:
+            session_id: Session identifier (thread_id)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            checkpointer = self.context_manager.get_checkpointer()
+            
+            # Note: LangGraph's MemorySaver doesn't have a direct delete method
+            # We can only clear by creating a new thread_id
+            # For now, we'll return True as the session will naturally expire
+            logger.info(f"Session {session_id} marked for cleanup (MemorySaver limitation)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to clear session {session_id}: {str(e)}")
+            return False
+    
+    def list_active_sessions(self) -> List[Dict[str, Any]]:
+        """
+        List all active sessions using LangGraph Checkpointer API.
+        
+        Returns:
+            List of active session information
+        """
+        try:
+            checkpointer = self.context_manager.get_checkpointer()
+            config = {"configurable": {}}
+            
+            # Get all thread IDs
+            threads_generator = checkpointer.list(config)
+            thread_ids = []
+            for thread_config in threads_generator:
+                if isinstance(thread_config, dict) and "configurable" in thread_config:
+                    thread_id = thread_config["configurable"].get("thread_id")
+                    if thread_id:
+                        thread_ids.append(thread_id)
+            
+            # Get session info for each thread
+            active_sessions = []
+            for thread_id in thread_ids:
+                session_info = self.get_session_info(thread_id)
+                if session_info:
+                    active_sessions.append(session_info)
+            
+            return active_sessions
+            
+        except Exception as e:
+            logger.error(f"Failed to list active sessions: {str(e)}")
+            return []

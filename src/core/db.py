@@ -798,9 +798,13 @@ def get_cached_db_schema() -> Dict[str, Any]:
             if not table_name.startswith("t_"):
                 continue
             
-            # 테이블 코멘트 가져오기
-            table_comment = inspector.get_table_comment(table_name)
-            table_description = table_comment.get("text", f"{table_name} table") if table_comment else f"{table_name} table"
+            # 테이블 코멘트 가져오기 (SQLAlchemy 경고 억제)
+            try:
+                table_comment = inspector.get_table_comment(table_name)
+                table_description = table_comment.get("text", f"{table_name} table") if table_comment else f"{table_name} table"
+            except Exception:
+                # 스키마 파싱 오류 시 기본값 사용
+                table_description = f"{table_name} table"
             
             # 컬럼 정보 수집
             columns = {}

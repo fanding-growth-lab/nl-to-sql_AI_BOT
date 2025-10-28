@@ -81,6 +81,7 @@ class AgentState(TypedDict):
     # Processing stages
     normalized_query: Optional[str]
     intent: Optional[str]
+    llm_intent_result: Optional[Dict[str, Any]]
     entities: List[Dict[str, Any]]
     agent_schema_mapping: Optional[Dict[str, Any]]
     sql_query: Optional[str]
@@ -97,6 +98,7 @@ class AgentState(TypedDict):
     
     # Validation and error handling
     validation_result: Optional[Dict[str, Any]]
+    processing_decision: Optional[Dict[str, Any]]
     is_valid: bool
     error_message: Optional[str]
     retry_count: int
@@ -235,8 +237,8 @@ def _initialize_nodes(config: Dict[str, Any]) -> Dict[str, Any]:
         "dynamic_sql_generator": DynamicSQLGenerator(config),
         "sql_generator": SQLGenerationNode(config),
         "sql_validator": SQLValidationNode(config),
-        "validation_node": ValidationNode(),
-        "user_review_node": UserReviewNode(),
+        "validation_node": ValidationNode(),  # 독립적으로 작동, config 불필요
+        "user_review_node": UserReviewNode(),  # 독립적으로 작동, config 불필요
         "data_summarizer": DataSummarizationNode(config)
     }
     
@@ -344,6 +346,14 @@ def route_after_validation_check(state: AgentState) -> str:
         logger.info(f"High confidence ({validation_result.confidence:.2f}), auto-approving")
         return "sql_execution"
     
+    # 재시도 횟수 체크 (무한 루프 방지)
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 3)
+    
+    if retry_count >= max_retries:
+        logger.error(f"Max retries ({max_retries}) exceeded, rejecting query")
+        return "reject"
+    
     # 검증 실패 시 사용자 검토로 이동 (강제 실행 제거)
     if hasattr(validation_result, 'status') and validation_result.status.value == "rejected":
         logger.warning("Query rejected due to validation issues, requiring user review")
@@ -401,9 +411,9 @@ def route_after_user_review(state: AgentState) -> str:
             logger.info("User modified query, regenerating SQL")
             return "modify"
     
-    # 기본값: 자동 승인된 것으로 간주하고 실행 진행
-    logger.warning("No clear review status found, defaulting to execution for safety")
-    return "sql_execution"
+    # 기본값: 명확하지 않은 상태에서는 안전을 위해 거부
+    logger.warning("No clear review status found, defaulting to reject for safety")
+    return "reject"
 
 
 def _execute_sql_query(state: AgentState) -> AgentState:
@@ -520,6 +530,7 @@ def initialize_state(
         # Processing stages
         normalized_query=None,
         intent=None,
+        llm_intent_result=None,
         entities=[],
         agent_schema_mapping=None,
         sql_query=None,
@@ -536,6 +547,7 @@ def initialize_state(
         
         # Validation and error handling
         validation_result=None,
+        processing_decision=None,
         is_valid=True,
         error_message=None,
         retry_count=0,

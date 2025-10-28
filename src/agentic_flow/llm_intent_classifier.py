@@ -6,25 +6,27 @@ LLM-based Intent Classifier
 
 import json
 import logging
+import time
 from typing import Dict, Any, Optional, Tuple
 from enum import Enum
 from dataclasses import dataclass
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+# Removed: JsonOutputParser (not used)
 
 from .nodes import BaseNode, QueryIntent
 from typing import Dict, Any, Optional
+from core.config import get_settings
+from .intent_classification_stats import get_stats_collector
 
 
+@dataclass
 class IntentClassificationResult:
     """인텐트 분류 결과"""
-    
-    def __init__(self, intent: QueryIntent, confidence: float, reasoning: str):
-        self.intent = intent
-        self.confidence = confidence
-        self.reasoning = reasoning
+    intent: QueryIntent
+    confidence: float
+    reasoning: str
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -40,29 +42,27 @@ class LLMIntentClassifier(BaseNode):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.llm = self._initialize_llm()
-        self.parser = JsonOutputParser()
+        # Removed: JsonOutputParser (not used)
         self._setup_prompt()
     
     def _initialize_llm(self) -> Optional[ChatGoogleGenerativeAI]:
         """빠른 LLM 모델 초기화"""
         try:
-            # 디버깅을 위한 로그 추가
-            llm_config = self.config.get('llm', {})
-            api_key = llm_config.get('api_key', '')
-            model = llm_config.get('model', 'gemini-2.5-pro')
+            # 설정에서 인텐트 분류용 LLM 설정 가져오기
+            settings = get_settings()
             
-            self.logger.info(f"LLMIntentClassifier config: llm={llm_config}")
-            self.logger.info(f"LLMIntentClassifier api_key: {api_key[:20] if api_key else 'EMPTY'}...")
-            self.logger.info(f"LLMIntentClassifier model: {model}")
+            self.logger.info(f"Intent LLM config: model={settings.llm.intent_model}, "
+                           f"temperature={settings.llm.intent_temperature}, "
+                           f"max_tokens={settings.llm.intent_max_tokens}")
             
-            # 빠른 응답을 위한 가벼운 모델 사용
+            # 인텐트 분류용 빠른 모델 사용
             return ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",  # 더 빠른 모델 사용
-                google_api_key=api_key,
-                temperature=0.1,  # 일관된 결과를 위한 낮은 temperature
-                max_output_tokens=256,  # 더 짧은 응답
-                request_timeout=10.0,  # 10초 타임아웃
-                convert_system_message_to_human=True  # 최신 버전 호환성
+                model=settings.llm.intent_model,
+                google_api_key=settings.llm.api_key,
+                temperature=settings.llm.intent_temperature,
+                max_output_tokens=settings.llm.intent_max_tokens,
+                request_timeout=10.0,
+                convert_system_message_to_human=True
             )
         except Exception as e:
             self.logger.warning(f"Failed to initialize LLM for intent classification: {str(e)}")
@@ -91,17 +91,23 @@ JSON 응답:
         """인텐트 분류 처리"""
         self._log_processing(state, "LLMIntentClassifier")
         
+        # 통계 수집을 위한 시작 시간 기록
+        start_time = time.time()
+        is_error = False
+        
         try:
             user_query = state.get("user_query")
             if not user_query:
                 self.logger.error("user_query is None or empty")
                 state["llm_intent_result"] = None
+                is_error = True
                 return state
             
             # LLM이 사용 불가능한 경우 None 반환
             if not self.llm:
                 self.logger.warning("LLM not available, skipping LLM intent classification")
                 state["llm_intent_result"] = None
+                is_error = True
                 return state
             
             # LLM으로 인텐트 분류
@@ -116,10 +122,16 @@ JSON 응답:
                 self.logger.debug(f"Reasoning: {result.reasoning}")
             else:
                 self.logger.warning("LLM intent classification failed")
+                is_error = True
             
         except Exception as e:
             self.logger.error(f"Error in LLM intent classification: {str(e)}")
             state["llm_intent_result"] = None
+            is_error = True
+        
+        finally:
+            # 통계 수집
+            self._record_classification_stats(result, start_time, is_error)
         
         return state
     
@@ -174,12 +186,44 @@ JSON 응답:
         
         return None
     
+    def _record_classification_stats(self, result: Optional[IntentClassificationResult], 
+                                   start_time: float, is_error: bool) -> None:
+        """통계 수집 메서드"""
+        try:
+            response_time_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
+            
+            if result:
+                intent = result.intent.value
+                confidence = result.confidence
+            else:
+                intent = "UNKNOWN"
+                confidence = 0.0
+            
+            # 통계 수집기 가져오기 및 기록
+            stats_collector = get_stats_collector()
+            stats_collector.record_classification(
+                intent=intent,
+                confidence=confidence,
+                response_time_ms=response_time_ms,
+                is_error=is_error
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to record classification stats: {e}")
+    
     def get_classification_stats(self) -> Dict[str, Any]:
         """분류 통계 반환"""
-        # 실제 구현에서는 통계 수집 로직 추가
-        return {
-            "total_classifications": 0,
-            "average_confidence": 0.0,
-            "intent_distribution": {},
-            "error_rate": 0.0
-        }
+        try:
+            stats_collector = get_stats_collector()
+            stats = stats_collector.get_stats()
+            return stats.to_dict()
+        except Exception as e:
+            self.logger.error(f"Failed to get classification stats: {e}")
+            return {
+                "total_classifications": 0,
+                "average_confidence": 0.0,
+                "intent_distribution": {},
+                "error_rate": 0.0,
+                "response_times": {"min": 0, "max": 0, "avg": 0},
+                "last_updated": 0
+            }

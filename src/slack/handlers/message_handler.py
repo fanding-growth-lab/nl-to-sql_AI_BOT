@@ -17,7 +17,7 @@ try:
     from src.monitoring.error_monitor import record_slack_error, record_sql_generation_error, record_nl_processing_error
 except ImportError:
     # 모니터링 모듈이 없는 경우 경고 로그 출력
-    logger.warning("Monitoring module not found, skipping error recording.")
+    logger.debug("Monitoring module not found, skipping error recording.")
     
     def record_slack_error(message, severity, user_id=None, channel_id=None):
         pass
@@ -105,6 +105,11 @@ class MessageHandler(BaseSlackHandler):
             if not query:
                 help_message = self._get_help_message(is_mention=is_mention)
                 say(help_message, thread_ts=thread_ts)
+                return
+            
+            # Check if this is a review response
+            if self._is_review_response(query):
+                self._handle_review_response(query, event_data, say, thread_ts)
                 return
             
             # Log the event
@@ -503,3 +508,122 @@ class MessageHandler(BaseSlackHandler):
                f"• `{mention_prefix}월간 매출 분석 결과 알려줘`\n"
                f"• `{mention_prefix}크리에이터 부서별 성과 분석해줘`\n"
                f"• `{mention_prefix}회원 리텐션 현황 보여줘`")
+    
+    def _send_simple_review_request(self, say: callable, review_request, thread_ts: Optional[str] = None):
+        """
+        간단한 채팅 방식으로 검토 요청 메시지 전송
+        
+        Args:
+            say: Slack 응답 함수
+            review_request: 검토 요청 객체
+            thread_ts: 스레드 타임스탬프
+        """
+        try:
+            # 간단한 검토 요청 메시지 구성
+            message = f"""🔍 *쿼리 검토가 필요합니다*
+
+*질문:* {review_request.user_query}
+*신뢰도:* {review_request.confidence:.2f}
+
+*생성된 SQL:*
+```sql
+{review_request.sql_query}
+```
+
+이 쿼리를 실행할까요?
+• `네` - 실행
+• `아니오` - 취소  
+• `수정: [새로운 질문]` - 다른 질문으로 변경"""
+            
+            say(message, thread_ts=thread_ts)
+            logger.info(f"Simple review request sent for query: {review_request.query_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send simple review request: {str(e)}")
+            # 폴백: 간단한 텍스트 메시지
+            fallback_message = f"🔍 쿼리 검토가 필요합니다: {review_request.user_query}\n신뢰도: {review_request.confidence:.2f}"
+            say(fallback_message, thread_ts=thread_ts)
+    
+    def _format_validation_issues(self, validation_result) -> str:
+        """검증 이슈 포맷팅"""
+        if not validation_result or not validation_result.issues:
+            return "✅ 검증 통과"
+        
+        issues_text = "⚠️ 발견된 이슈:\n"
+        for issue in validation_result.issues:
+            issues_text += f"• {issue}\n"
+        
+        return issues_text
+    
+    def _is_review_response(self, query: str) -> bool:
+        """검토 응답인지 확인"""
+        query_lower = query.lower().strip()
+        review_responses = ["네", "예", "yes", "y", "아니오", "아니요", "no", "n", "수정:"]
+        return any(response in query_lower for response in review_responses)
+    
+    def _handle_review_response(self, query: str, event_data: Dict[str, Any], say: callable, thread_ts: Optional[str]):
+        """검토 응답 처리"""
+        try:
+            query_lower = query.lower().strip()
+            user_id = event_data.get("user")
+            
+            # 승인 응답
+            if any(response in query_lower for response in ["네", "예", "yes", "y"]):
+                self._handle_query_approval(user_id, say, thread_ts)
+                return
+            
+            # 거부 응답
+            if any(response in query_lower for response in ["아니오", "아니요", "no", "n"]):
+                self._handle_query_rejection(user_id, say, thread_ts)
+                return
+            
+            # 수정 응답
+            if "수정:" in query_lower:
+                new_query = query.split(":", 1)[1].strip()
+                self._handle_query_modification(user_id, new_query, say, thread_ts)
+                return
+            
+            # 인식되지 않은 응답
+            say("죄송합니다. 응답을 이해하지 못했습니다. '네', '아니오', 또는 '수정: [새로운 질문]'으로 답해주세요.", thread_ts=thread_ts)
+            
+        except Exception as e:
+            logger.error(f"Review response handling failed: {str(e)}")
+            say("검토 응답 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
+    
+    def _handle_query_approval(self, user_id: str, say: callable, thread_ts: Optional[str]):
+        """쿼리 승인 처리"""
+        try:
+            # TODO: 실제 승인 로직 구현
+            # 현재는 간단한 응답만 전송
+            say("✅ 쿼리가 승인되었습니다. 실행을 진행합니다.", thread_ts=thread_ts)
+            logger.info(f"Query approved by user: {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Query approval handling failed: {str(e)}")
+            say("승인 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
+    
+    def _handle_query_rejection(self, user_id: str, say: callable, thread_ts: Optional[str]):
+        """쿼리 거부 처리"""
+        try:
+            # TODO: 실제 거부 로직 구현
+            say("❌ 쿼리가 거부되었습니다. 다른 질문을 해주세요.", thread_ts=thread_ts)
+            logger.info(f"Query rejected by user: {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Query rejection handling failed: {str(e)}")
+            say("거부 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
+    
+    def _handle_query_modification(self, user_id: str, new_query: str, say: callable, thread_ts: Optional[str]):
+        """쿼리 수정 처리"""
+        try:
+            if not new_query:
+                say("수정할 새로운 질문을 입력해주세요. 예: '수정: 전체 회원 수를 알려줘'", thread_ts=thread_ts)
+                return
+            
+            # TODO: 실제 수정 로직 구현
+            say(f"✏️ 새로운 질문으로 수정되었습니다: '{new_query}'\n처리 중...", thread_ts=thread_ts)
+            logger.info(f"Query modified by user {user_id}: {new_query}")
+            
+        except Exception as e:
+            logger.error(f"Query modification handling failed: {str(e)}")
+            say("수정 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)

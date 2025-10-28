@@ -41,14 +41,14 @@
         ".*(january|february|march|april|may|june|july|august|september|october|november|december).*(new|신규).*(members|회원).*",
         ".*(jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec).*(new|신규).*(members|회원).*"
       ],
-      "table": "t_member_login_log",
+      "table": "t_member_info",
       "columns": [
         "member_no",
         "ins_datetime"
       ],
       "conditions": "DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
       "aggregation": "COUNT(DISTINCT member_no)",
-      "sql_template": "SELECT COUNT(DISTINCT member_no) as new_members FROM t_member_login_log WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
+      "sql_template": "SELECT COUNT(DISTINCT member_no) as new_members FROM t_member_info WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
       "confidence": 0.98,
       "examples": [
         "8월 신규 회원수",
@@ -344,14 +344,14 @@
         ".*(신규|새로운|new).*(회원|맴버).*(현황|상황|수).*",
         ".*(9월|9월달).*(신규|새로운).*(회원|맴버).*"
       ],
-      "table": "t_member",
+      "table": "t_member_info",
       "columns": [
-        "no",
-        "status"
+        "member_no",
+        "ins_datetime"
       ],
       "conditions": "DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
       "aggregation": "COUNT(DISTINCT member_no)",
-      "sql_template": "SELECT COUNT(DISTINCT member_no) as new_members FROM t_member_login_log WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
+      "sql_template": "SELECT COUNT(DISTINCT member_no) as new_members FROM t_member_info WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = CONCAT(YEAR(NOW()), '-{month}')",
       "confidence": 0.95,
       "examples": [
         "9월달 신규회원 현황을 알려줘",
@@ -393,17 +393,207 @@
         "business_impact": "medium",
         "complexity": "medium"
       }
+    },
+    {
+      "id": "fanding_membership_info",
+      "category": "membership_data",
+      "priority": "high",
+      "query_patterns": [
+        ".*(멤버십|맴버쉽|팬딩).*(정보|현황|상태).*",
+        ".*(팬딩|fanding).*(가입|구독).*(정보|현황).*"
+      ],
+      "table": "t_fanding",
+      "columns": [
+        "No",
+        "member_no",
+        "creator_no",
+        "ins_datetime",
+        "fanding_status"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as total_fanding FROM t_fanding WHERE fanding_status = 'T'",
+      "confidence": 0.95,
+      "examples": [
+        "멤버십 가입 현황을 알려줘",
+        "팬딩 구독 정보 조회",
+        "활성 멤버십 수"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "high",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "payment_revenue_analysis",
+      "category": "revenue_analysis",
+      "priority": "high",
+      "query_patterns": [
+        ".*(결제|매출|revenue).*(현황|분석|통계).*",
+        ".*(매출|revenue).*(월별|일별|기간별).*"
+      ],
+      "table": "t_payment",
+      "columns": [
+        "no",
+        "member_no",
+        "seller_creator_no",
+        "remain_price",
+        "remain_heat",
+        "status",
+        "pay_datetime"
+      ],
+      "conditions": "status IN ('T', 'P')",
+      "aggregation": "SUM(remain_price + remain_heat * 100)",
+      "sql_template": "SELECT SUM(remain_price + remain_heat * 100) as total_revenue FROM t_payment WHERE status IN ('T', 'P')",
+      "confidence": 0.95,
+      "examples": [
+        "총 매출을 알려줘",
+        "결제 현황 분석",
+        "월별 매출 통계"
+      ],
+      "metadata": {
+        "frequency": "high",
+        "business_impact": "high",
+        "complexity": "medium"
+      }
+    },
+    {
+      "id": "community_posts_analysis",
+      "category": "content_analysis",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(커뮤니티|community).*(게시글|포스트).*(현황|분석).*",
+        ".*(게시글|포스트).*(커뮤니티|community).*(통계|분석).*"
+      ],
+      "table": "t_community",
+      "columns": [
+        "no",
+        "creator_no",
+        "member_no",
+        "ins_datetime",
+        "status",
+        "content_type"
+      ],
+      "conditions": "status = 'public'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as total_posts FROM t_community WHERE status = 'public'",
+      "confidence": 0.9,
+      "examples": [
+        "커뮤니티 게시글 수를 알려줘",
+        "공개된 포스트 현황",
+        "커뮤니티 활동 분석"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "follow_relationship_analysis",
+      "category": "relationship_analysis",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(팔로우|follow).*(관계|현황|분석).*",
+        ".*(팔로워|follower).*(수|통계).*"
+      ],
+      "table": "t_follow",
+      "columns": [
+        "no",
+        "member_no",
+        "creator_no",
+        "ins_datetime"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as total_follows FROM t_follow",
+      "confidence": 0.9,
+      "examples": [
+        "팔로우 관계 수를 알려줘",
+        "팔로워 통계",
+        "팔로우 현황 분석"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "review_feedback_analysis",
+      "category": "feedback_analysis",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(리뷰|review).*(현황|분석|통계).*",
+        ".*(피드백|feedback).*(분석|현황).*"
+      ],
+      "table": "t_review",
+      "columns": [
+        "no",
+        "creator_no",
+        "member_no",
+        "fanding_log_no",
+        "ins_datetime"
+      ],
+      "conditions": "1=1",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as total_reviews FROM t_review",
+      "confidence": 0.9,
+      "examples": [
+        "리뷰 수를 알려줘",
+        "피드백 현황 분석",
+        "리뷰 통계"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "low"
+      }
+    },
+    {
+      "id": "tier_membership_analysis",
+      "category": "tier_analysis",
+      "priority": "medium",
+      "query_patterns": [
+        ".*(티어|tier).*(멤버십|membership).*(분석|현황).*",
+        ".*(멤버십|membership).*(티어|tier).*(통계|분석).*"
+      ],
+      "table": "t_tier",
+      "columns": [
+        "no",
+        "creator_no",
+        "public_status",
+        "is_renewable",
+        "end_criteria",
+        "name",
+        "description"
+      ],
+      "conditions": "public_status = 'public'",
+      "aggregation": "COUNT(*)",
+      "sql_template": "SELECT COUNT(*) as total_tiers FROM t_tier WHERE public_status = 'public'",
+      "confidence": 0.9,
+      "examples": [
+        "공개된 멤버십 티어 수",
+        "티어 현황 분석",
+        "멤버십 등급 통계"
+      ],
+      "metadata": {
+        "frequency": "medium",
+        "business_impact": "medium",
+        "complexity": "low"
+      }
     }
   ],
   "statistics": {
-    "total_patterns": 12,
-    "high_priority": 5,
-    "medium_priority": 4,
+    "total_patterns": 18,
+    "high_priority": 8,
+    "medium_priority": 8,
     "low_priority": 2,
-    "avg_confidence": 0.9266666666666666,
-    "coverage_estimate": "90%",
+    "avg_confidence": 0.93,
+    "coverage_estimate": "95%",
     "last_updated": "2024-12-19",
-    "schema_version": "1.2",
-    "notes": "Updated to match actual DB schema - fixed table/column references and status codes"
+    "schema_version": "1.3",
+    "notes": "Updated to match actual DB schema - added missing tables and fixed table/column references"
   }
 }

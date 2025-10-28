@@ -13,13 +13,11 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
 from .prompts import GeminiSQLGenerator, SQLPromptTemplate
 from .fanding_sql_templates import FandingSQLTemplates
-from .enhanced_rag_mapper import EnhancedRAGMapper
-from .data_insight_analyzer import DataInsightAnalyzer
-from .dynamic_schema_expander import DynamicSchemaExpander
+# Removed unused imports: enhanced_rag_mapper, data_insight_analyzer, dynamic_schema_expander
 
 from .state import (
     GraphState, Entity, SchemaMapping, SQLResult, 
@@ -295,8 +293,9 @@ class NLProcessor(BaseNode):
         super().__init__(config)
         self.llm = self._initialize_llm()
         self.fanding_templates = FandingSQLTemplates()
-        self.rag_mapper = EnhancedRAGMapper(config)
-        self.schema_expander = DynamicSchemaExpander(config)
+        # Removed: EnhancedRAGMapper and DynamicSchemaExpander (deleted modules)
+        # self.rag_mapper = EnhancedRAGMapper(config)
+        # self.schema_expander = DynamicSchemaExpander(config)
     
     def _initialize_llm(self):
         """Initialize the LLM for natural language processing."""
@@ -454,18 +453,19 @@ class NLProcessor(BaseNode):
             self.logger.info("✅ Generated clarification question for ambiguous query (this is normal behavior)")
             return
         
-        # 1. RAG 매핑 시도 (우선순위 높음)
-        try:
-            rag_result = self.rag_mapper.map_query_to_schema(user_query, context={"prefer_detailed": True})
-            # HIGH 임계값(0.8) 사용: RAG 매핑은 정확도가 높아야 하므로 높은 신뢰도 요구
-            if rag_result and rag_result.confidence > LLM_CONFIDENCE_THRESHOLD_HIGH:
-                self.logger.info(f"RAG mapping successful: {rag_result.source.value} (confidence: {rag_result.confidence:.2f})")
-                set_rag_mapping_result(state, rag_result)
-                state["skip_sql_generation"] = False
-                self.logger.info(f"RAG SQL applied: {rag_result.sql_template[:100]}...")
-                return
-        except Exception as e:
-            self.logger.warning(f"RAG mapping failed: {str(e)}")
+        # 1. RAG 매핑 시도 (우선순위 높음) - DISABLED: EnhancedRAGMapper deleted
+        # try:
+        #     rag_result = self.rag_mapper.map_query_to_schema(user_query, context={"prefer_detailed": True})
+        #     if rag_result and rag_result.confidence > LLM_CONFIDENCE_THRESHOLD_HIGH:
+        #         self.logger.info(f"RAG mapping successful: {rag_result.source.value} (confidence: {rag_result.confidence:.2f})")
+        #         set_rag_mapping_result(state, rag_result)
+        #         state["skip_sql_generation"] = False
+        #         self.logger.info(f"RAG SQL applied: {rag_result.sql_template[:100]}...")
+        #         return
+        # except Exception as e:
+        #     self.logger.warning(f"RAG mapping failed: {str(e)}")
+        
+        # Skip RAG mapping and go directly to Fanding templates
         
         # 2. Fanding 템플릿 매칭 시도 (폴백)
         fanding_template = self.fanding_templates.match_query_to_template(user_query)
@@ -475,18 +475,17 @@ class NLProcessor(BaseNode):
             state["skip_sql_generation"] = False
             self.logger.info(f"SQL template applied: {fanding_template.sql_template}")
         else:
-            # 3. 동적 스키마 확장 시도 (새로운 기능)
+            # 3. 동적 월별 템플릿 생성 시도 (멤버십 성과 관련)
             try:
-                dynamic_pattern = self.schema_expander.analyze_query_pattern(user_query)
-                # RAG 임계값(0.6) 사용: 동적 패턴 매칭은 중간 수준의 신뢰도로도 충분
-                if dynamic_pattern and dynamic_pattern.confidence > RAG_CONFIDENCE_THRESHOLD:
-                    self.logger.info(f"Dynamic pattern generated: {dynamic_pattern.table} (confidence: {dynamic_pattern.confidence:.2f})")
-                    set_dynamic_pattern(state, dynamic_pattern)
+                dynamic_template = self.fanding_templates.create_dynamic_monthly_template(user_query)
+                if dynamic_template:
+                    self.logger.info(f"Dynamic monthly template created: {dynamic_template.name}")
+                    set_fanding_template(state, dynamic_template)
                     state["skip_sql_generation"] = False
-                    self.logger.info(f"Dynamic SQL applied: {dynamic_pattern.sql_template}")
+                    self.logger.info(f"Dynamic SQL applied: {dynamic_template.sql_template[:100]}...")
                     return
             except Exception as e:
-                self.logger.warning(f"Dynamic schema expansion failed: {str(e)}")
+                self.logger.warning(f"Dynamic monthly template creation failed: {str(e)}")
             
             # 4. 모든 방법 실패 시 일반 SQL 생성으로 진행
             self.logger.info("No template/pattern matched, proceeding with general SQL generation")
@@ -774,9 +773,9 @@ class NLProcessor(BaseNode):
                 # LLM이 없으면 기본 데이터 조회로 분류
                 return QueryIntent.SELECT, []
             
+            # 최신 LangChain 방식: SystemMessage 대신 HumanMessage에 시스템 프롬프트 포함
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=f"Analyze this query: {query}")
+                HumanMessage(content=f"{system_prompt}\n\nAnalyze this query: {query}")
             ]
             
             response = self.llm.invoke(messages)
@@ -1436,9 +1435,12 @@ class SQLValidationNode(BaseNode):
                 if re.search(pattern, sql_upper):
                     issues.append(f"Dangerous keyword detected: {keyword}")
             
-            # 주석 확인 (SQL 인젝션 방지)
-            if '--' in sql_query or '/*' in sql_query:
-                issues.append("Suspicious comment patterns detected")
+            # 주석 확인 (SQL 인젝션 방지) - 템플릿의 정당한 주석은 허용
+            # 멀티라인 주석 /* */만 차단 (단일 라인 주석 -- 는 허용)
+            if '/*' in sql_query or '*/' in sql_query:
+                issues.append("Suspicious multi-line comment detected")
+            
+            # 단일 라인 주석(--)은 허용 (템플릿에서 정당하게 사용됨)
             
             return {
                 "is_valid": len(issues) == 0,
@@ -1493,7 +1495,8 @@ class DataSummarizationNode(BaseNode):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.llm = self._initialize_llm()
-        self.insight_analyzer = DataInsightAnalyzer(config)
+        # Removed: DataInsightAnalyzer (deleted module)
+        # self.insight_analyzer = DataInsightAnalyzer(config)
         
     def _initialize_llm(self):
         """LLM 초기화"""
@@ -1559,27 +1562,31 @@ class DataSummarizationNode(BaseNode):
             # 결과 데이터 분석
             result_stats = self._analyze_results(query_result)
             
-            # 인사이트 분석 수행
-            try:
-                sql_query = state.get("sql_query", "")
-                insight_report = self.insight_analyzer.analyze_data(user_query, query_result, sql_query)
-                
-                # 인사이트 리포트를 상태에 저장
-                state["insight_report"] = insight_report
-                state["business_insights"] = insight_report.insights
-                state["insight_summary"] = insight_report.summary
-                
-                # 인사이트가 있는 경우 요약에 포함
-                if insight_report.insights:
-                    insight_text = self.insight_analyzer.format_insight_report(insight_report)
-                    state["insight_report_formatted"] = insight_text
-                    self.logger.info(f"Generated {len(insight_report.insights)} business insights")
-                
-            except Exception as e:
-                self.logger.warning(f"Insight analysis failed: {e}")
-                # 인사이트 분석 실패해도 기본 요약은 계속 진행
-                state["insight_report"] = None
-                state["business_insights"] = []
+            # 인사이트 분석 수행 - DISABLED: DataInsightAnalyzer deleted
+            # try:
+            #     sql_query = state.get("sql_query", "")
+            #     insight_report = self.insight_analyzer.analyze_data(user_query, query_result, sql_query)
+            #     
+            #     # 인사이트 리포트를 상태에 저장
+            #     state["insight_report"] = insight_report
+            #     state["business_insights"] = insight_report.insights
+            #     state["insight_summary"] = insight_report.summary
+            #     
+            #     # 인사이트가 있는 경우 요약에 포함
+            #     if insight_report.insights:
+            #         insight_text = self.insight_analyzer.format_insight_report(insight_report)
+            #         state["insight_report_formatted"] = insight_text
+            #     self.logger.info(f"Generated {len(insight_report.insights)} business insights")
+            #     
+            # except Exception as e:
+            #     self.logger.warning(f"Insight analysis failed: {e}")
+            #     # 인사이트 분석 실패해도 기본 요약은 계속 진행
+            #     state["insight_report"] = None
+            #     state["business_insights"] = []
+            
+            # Set default values since insight analyzer is disabled
+            state["insight_report"] = None
+            state["business_insights"] = []
             
             # 요약 생성
             if self.llm:
@@ -1672,9 +1679,9 @@ class DataSummarizationNode(BaseNode):
 요약:
 """
             
+            # 최신 LangChain 방식: SystemMessage 대신 HumanMessage에 시스템 프롬프트 포함
             messages = [
-                SystemMessage(content="당신은 데이터 분석 전문가입니다. 쿼리 결과를 사용자 친화적으로 요약해주세요."),
-                HumanMessage(content=summary_prompt)
+                HumanMessage(content=f"당신은 데이터 분석 전문가입니다. 쿼리 결과를 사용자 친화적으로 요약해주세요.\n\n{summary_prompt}")
             ]
             
             response = self.llm.invoke(messages)

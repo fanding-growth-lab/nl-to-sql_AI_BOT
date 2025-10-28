@@ -248,3 +248,107 @@ def get_effective_sql(state: GraphState) -> Optional[str]:
 def is_sql_generation_skipped(state: GraphState) -> bool:
     """Check if SQL generation should be skipped."""
     return state.get("skip_sql_generation", False) or state.get("conversation_response") is not None
+
+
+# === New State Helper Functions for Consistency ===
+
+def set_skip_sql(state: GraphState, skip: bool = True) -> None:
+    """Set skip_sql_generation flag."""
+    state["skip_sql_generation"] = skip
+
+
+def set_intent(state: GraphState, intent: QueryIntent) -> None:
+    """Set query intent."""
+    state["intent"] = intent
+
+
+def set_entities(state: GraphState, entities: List[Entity]) -> None:
+    """Set extracted entities."""
+    state["entities"] = entities
+
+
+def set_normalized_query(state: GraphState, query: str) -> None:
+    """Set normalized query."""
+    state["normalized_query"] = query
+
+
+def set_confidence_score(state: GraphState, component: str, score: float) -> None:
+    """Set confidence score for a specific component."""
+    if "confidence_scores" not in state:
+        state["confidence_scores"] = {}
+    state["confidence_scores"][component] = score
+
+
+def set_error_message(state: GraphState, message: str) -> None:
+    """Set error message."""
+    state["error_message"] = message
+
+
+def set_success(state: GraphState, success: bool = True) -> None:
+    """Set success flag."""
+    state["success"] = success
+
+
+def set_sql_query(state: GraphState, sql: Optional[str]) -> None:
+    """Set SQL query."""
+    state["sql_query"] = sql
+
+
+def set_validated_sql(state: GraphState, sql: Optional[str]) -> None:
+    """Set validated SQL query."""
+    state["validated_sql"] = sql
+
+
+def set_query_result(state: GraphState, result: List[Dict[str, Any]]) -> None:
+    """Set query execution result."""
+    state["query_result"] = result
+
+
+def set_data_summary(state: GraphState, summary: str) -> None:
+    """Set data summary."""
+    state["data_summary"] = summary
+
+
+def set_schema_mapping(state: GraphState, mapping: SchemaMapping) -> None:
+    """Set schema mapping result."""
+    state["schema_mapping"] = mapping
+
+
+def set_validation_result(state: GraphState, result: Dict[str, Any]) -> None:
+    """Set validation result."""
+    state["validation_result"] = result
+
+
+def set_is_valid(state: GraphState, is_valid: bool) -> None:
+    """Set validation flag."""
+    state["is_valid"] = is_valid
+
+
+def set_sql_validation_failed(state: GraphState, failed: bool) -> None:
+    """Set SQL validation failed flag."""
+    state["sql_validation_failed"] = failed
+
+
+def set_conversation_text(state: GraphState, text: str) -> None:
+    """Set conversation text."""
+    state["conversation_text"] = text
+
+
+def set_clarification_question(state: GraphState, question: str) -> None:
+    """Set clarification question."""
+    state["clarification_question"] = question
+
+
+def set_slots(state: GraphState, slots: Dict[str, Any]) -> None:
+    """Set extracted slots."""
+    state["slots"] = slots
+
+
+def set_llm_intent_result(state: GraphState, result: Optional[Dict[str, Any]]) -> None:
+    """Set LLM intent classification result."""
+    state["llm_intent_result"] = result
+
+
+def set_processing_decision(state: GraphState, decision: Optional[Dict[str, Any]]) -> None:
+    """Set processing decision."""
+    state["processing_decision"] = decision

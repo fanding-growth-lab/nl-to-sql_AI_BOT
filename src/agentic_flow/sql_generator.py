@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
 from .state import (
     GraphState, SchemaMapping, SQLResult, 
@@ -197,9 +197,9 @@ class SQLGenerator(BaseNode):
                 else:
                     return "SELECT 1 as placeholder;"
             
+            # 최신 LangChain 방식: SystemMessage 대신 HumanMessage에 시스템 프롬프트 포함
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=f"Generate SQL for: {query}")
+                HumanMessage(content=f"{system_prompt}\n\nGenerate SQL for: {query}")
             ]
             
             response = self.llm.invoke(messages)
