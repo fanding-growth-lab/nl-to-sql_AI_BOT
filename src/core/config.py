@@ -105,6 +105,7 @@ class SlackConfig(BaseSettings):
 class LLMConfig(BaseSettings):
     """LLM (Large Language Model) configuration."""
     model_config = SettingsConfigDict(
+        env_prefix="LLM_",
         case_sensitive=False,
         env_file=get_env_file_path(),
         env_file_encoding="utf-8",
