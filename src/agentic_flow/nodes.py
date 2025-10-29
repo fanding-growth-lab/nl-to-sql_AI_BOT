@@ -350,7 +350,12 @@ class NLProcessor(BaseNode):
             
             # Extract intent and entities (LLM 결과 포함)
             llm_intent_result = state.get("llm_intent_result")
-            intent, entities = self._extract_intent_and_entities(normalized_query, llm_intent_result)
+            intent, entities = self._extract_intent_and_entities(normalized_query, llm_intent_result)   # NOTE: confidence가 높다면 LLM의 것을, 낮다면 규칙 기반으로 intent를 분류하고 필요하다면 entity를 추출함
+            
+            # Update state
+            state["normalized_query"] = normalized_query
+            state["intent"] = intent
+            state["entities"] = entities
             
             # 인사말 처리 (우선순위 1)
             if intent == QueryIntent.GREETING:
@@ -378,11 +383,6 @@ class NLProcessor(BaseNode):
                 self.logger.info(f"Schema information request handled: {user_query}")
                 return state
             
-            # Update state
-            state["normalized_query"] = normalized_query
-            state["intent"] = intent
-            state["entities"] = entities
-            
             # 인텐트별 처리 (개선된 버전)
             if intent == QueryIntent.GENERAL_CHAT:
                 # 일반 대화 처리
@@ -396,6 +396,8 @@ class NLProcessor(BaseNode):
                 # 데이터 조회 의도 - Fanding 템플릿 매칭 시도
                 self.logger.info(f"Data query intent detected: {user_query}")
                 self._handle_data_query(state, user_query)
+                state["success"] = True
+            
             else:
                 # 알 수 없는 인텐트 - 일반 대화로 처리
                 self.logger.warning(f"Unknown intent: {intent}, treating as general chat")

@@ -12,10 +12,11 @@ pydantic-settings==2.1.0
 mysql-connector-python==8.2.0
 sqlalchemy==2.0.39
 pymysql==1.1.0
+sqlparse==0.5.3
 
 # Slack Integration
 slack-bolt==1.26.0
-slack-sdk==3.26.1
+slack-sdk==3.37.0
 
 # LLM Integration
 langchain==0.3.21
@@ -26,11 +27,12 @@ langgraph==0.3.18
 google-genai==1.46.0
 
 # HTTP Client
-httpx==0.25.2
+httpx==0.28.1
 requests==2.31.0
 
 # Logging
 structlog==23.2.0
+psutil==7.1.2
 
 # Testing
 pytest==7.4.3
