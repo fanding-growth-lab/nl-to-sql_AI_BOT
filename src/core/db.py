@@ -798,12 +798,31 @@ def get_cached_db_schema() -> Dict[str, Any]:
             if not table_name.startswith("t_"):
                 continue
             
-            # 테이블 코멘트 가져오기 (SQLAlchemy 경고 억제)
+            # 테이블 코멘트 가져오기 (제약조건 정보 필터링)
             try:
                 table_comment = inspector.get_table_comment(table_name)
-                table_description = table_comment.get("text", f"{table_name} table") if table_comment else f"{table_name} table"
-            except Exception:
+                if table_comment and table_comment.get("text"):
+                    comment_text = table_comment.get("text")
+                    # 제약조건 정보가 포함된 경우 순수한 설명만 추출
+                    if "CONSTRAINT" in comment_text or "FOREIGN KEY" in comment_text:
+                        # 제약조건 정보 제거하고 순수한 설명만 사용
+                        lines = comment_text.split('\n')
+                        clean_lines = []
+                        for line in lines:
+                            line = line.strip()
+                            if not (line.startswith('CONSTRAINT') or 
+                                   line.startswith('FOREIGN KEY') or 
+                                   line.startswith('REFERENCES') or
+                                   line.startswith('PRIMARY KEY')):
+                                clean_lines.append(line)
+                        table_description = ' '.join(clean_lines).strip() or f"{table_name} table"
+                    else:
+                        table_description = comment_text
+                else:
+                    table_description = f"{table_name} table"
+            except Exception as e:
                 # 스키마 파싱 오류 시 기본값 사용
+                logger.debug(f"테이블 코멘트 파싱 실패 ({table_name}): {e}")
                 table_description = f"{table_name} table"
             
             # 컬럼 정보 수집

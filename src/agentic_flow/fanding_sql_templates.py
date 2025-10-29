@@ -521,9 +521,35 @@ class FandingSQLTemplates:
             param_template = copy.deepcopy(template)
             
             # SQL 템플릿에 파라미터 적용
-            param_template.sql_template = template.sql_template.format(**final_params)
-            param_template.name = template.name.format(**final_params)
-            param_template.description = template.description.format(**final_params)
+            # {month:02d} 같은 복잡한 포맷 문자열은 직접 처리
+            sql_with_params = template.sql_template
+            if 'month' in final_params:
+                month_val = final_params['month']
+                sql_with_params = sql_with_params.replace('{month:02d}', f"{month_val:02d}")
+                sql_with_params = sql_with_params.replace('{month}', str(month_val))
+            
+            # 나머지 파라미터는 일반 format으로 처리
+            other_params = {k: v for k, v in final_params.items() if k != 'month'}
+            if other_params:
+                sql_with_params = sql_with_params.format(**other_params)
+            
+            param_template.sql_template = sql_with_params
+            
+            # name과 description 포맷팅 (month 파라미터 포함)
+            name_with_params = template.name
+            desc_with_params = template.description
+            if 'month' in final_params:
+                month_val = final_params['month']
+                name_with_params = name_with_params.replace('{month}', str(month_val))
+                desc_with_params = desc_with_params.replace('{month}', str(month_val))
+            
+            other_params = {k: v for k, v in final_params.items() if k != 'month'}
+            if other_params:
+                name_with_params = name_with_params.format(**other_params)
+                desc_with_params = desc_with_params.format(**other_params)
+            
+            param_template.name = name_with_params
+            param_template.description = desc_with_params
             
             return param_template
             
@@ -707,7 +733,7 @@ class FandingSQLTemplates:
     
     def _calculate_keyword_score(self, query_lower: str, template_keywords: List[str]) -> float:
         """
-        쿼리와 템플릿 키워드 간의 매칭 점수 계산 (Jaccard 유사도 기반)
+        쿼리와 템플릿 키워드 간의 매칭 점수 계산 (Jaccard 유사도 기반, 개선됨)
         
         Args:
             query_lower: 소문자로 변환된 쿼리
@@ -719,33 +745,75 @@ class FandingSQLTemplates:
         if not template_keywords:
             return 0.0
         
-        # 쿼리에서 키워드 추출 (간단한 토큰화)
+        # 쿼리에서 키워드 추출 (단어별 분리 + 부분 매칭)
+        import re
         query_words = set(query_lower.split())
+        
+        # 부분 매칭: "9월" 같은 키워드는 "9월신규"에서도 매칭되어야 함
+        query_text = query_lower
         
         # 템플릿 키워드를 소문자로 변환
         template_words = set([kw.lower() for kw in template_keywords])
         
-        # 교집합과 합집합 계산
-        intersection = query_words.intersection(template_words)
+        # 교집합 계산 (단어 단위)
+        word_intersection = query_words.intersection(template_words)
+        
+        # 부분 매칭 계산 (문자열 포함 여부)
+        partial_matches = []
+        for kw in template_keywords:
+            kw_lower = kw.lower()
+            if kw_lower in query_text:
+                partial_matches.append(kw_lower)
+        
+        # 전체 매칭 키워드 집합 (단어 매칭 + 부분 매칭 중복 제거)
+        all_matches = set(list(word_intersection) + partial_matches)
+        
+        # 월 키워드 가중치 (특정 월 템플릿 우선)
+        month_keywords = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월']
+        has_month_in_query = any(month in query_lower for month in month_keywords)
+        has_month_in_template = any(month in template_keywords for month in month_keywords)
+        
+        # 월 매칭 보너스: 쿼리와 템플릿 모두 월이 있으면 높은 점수
+        month_bonus = 0.0
+        if has_month_in_query and has_month_in_template:
+            # 쿼리에서 월 추출
+            query_month = None
+            for month in month_keywords:
+                if month in query_lower:
+                    query_month = month
+                    break
+            
+            # 템플릿에서 월 추출
+            template_month = None
+            for month in month_keywords:
+                if month in template_keywords:
+                    template_month = month
+                    break
+            
+            # 동일한 월이면 높은 보너스
+            if query_month and template_month and query_month == template_month:
+                month_bonus = 0.5
+            elif query_month and template_month:
+                month_bonus = 0.3  # 다른 월이지만 월 키워드가 둘 다 있음
+        
+        # 합집합 계산
         union = query_words.union(template_words)
         
         if not union:
             return 0.0
         
         # Jaccard 유사도 계산
-        jaccard_score = len(intersection) / len(union)
-        
-        # 추가 가중치: 정확한 키워드 매칭에 더 높은 점수
-        exact_matches = len(intersection)
-        total_template_keywords = len(template_keywords)
+        jaccard_score = len(all_matches) / len(union) if union else 0
         
         # 정확한 매칭 비율
+        exact_matches = len(all_matches)
+        total_template_keywords = len(template_keywords)
         exact_match_ratio = exact_matches / total_template_keywords if total_template_keywords > 0 else 0
         
-        # 최종 점수: Jaccard 유사도와 정확한 매칭 비율의 가중 평균
-        final_score = (jaccard_score * 0.7) + (exact_match_ratio * 0.3)
+        # 최종 점수: Jaccard 유사도, 정확한 매칭 비율, 월 보너스의 가중 평균
+        base_score = (jaccard_score * 0.5) + (exact_match_ratio * 0.3) + (month_bonus)
         
-        return min(final_score, 1.0)  # 최대 1.0으로 제한
+        return min(base_score, 1.0)  # 최대 1.0으로 제한
     
     def _apply_dynamic_year_to_template(self, query: str, template: SQLTemplate) -> SQLTemplate:
         """템플릿에 동적 연도 처리 적용"""
@@ -885,7 +953,6 @@ class FandingSQLTemplates:
             for table_name, description in self._get_table_descriptions().items():
                 # description이 None인 경우 처리
                 description_safe = description or ""
-                
                 # 테이블명이 쿼리에 명시적으로 포함되어야 함 (부분 매칭 방지)
                 if (table_name.lower() in query_lower and 
                     len(table_name) > 3 and  # 너무 짧은 테이블명 제외
@@ -1003,6 +1070,14 @@ class FandingSQLTemplates:
             if match:
                 params['months'] = int(match.group(1))
                 break
+        
+        # 단일 월 파라미터 추출 (예: "9월", "9월 신규 회원")
+        single_month_pattern = r'(\d+)\s*월'
+        month_match = re.search(single_month_pattern, query_lower)
+        if month_match:
+            month_num = int(month_match.group(1))
+            if 1 <= month_num <= 12:
+                params['month'] = month_num
         
         return params
 

@@ -62,7 +62,6 @@ class LLMIntentClassifier(BaseNode):
                 temperature=settings.llm.intent_temperature,
                 max_output_tokens=settings.llm.intent_max_tokens,
                 request_timeout=10.0,
-                convert_system_message_to_human=True
             )
         except Exception as e:
             self.logger.warning(f"Failed to initialize LLM for intent classification: {str(e)}")

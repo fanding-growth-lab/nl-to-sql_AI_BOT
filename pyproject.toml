@@ -27,29 +27,29 @@ classifiers = [
 requires-python = ">=3.9"
 dependencies = [
     # Core Framework
-    "fastapi==0.104.1",
+    "fastapi==0.116.1",
     "uvicorn[standard]==0.24.0",
     
     # Configuration Management
-    "pydantic==2.5.0",
+    "pydantic==2.10.6",
     "pydantic-settings==2.1.0",
     
     # Database
     "mysql-connector-python==8.2.0",
-    "sqlalchemy==2.0.23",
+    "sqlalchemy==2.0.39",
     "pymysql==1.1.0",
     
     # Slack Integration
-    "slack-bolt==1.18.1",
+    "slack-bolt==1.26.0",
     "slack-sdk==3.26.1",
     
     # LLM Integration
-    "langchain==0.1.0",
-    "langchain-google-genai==0.0.6",
-    "langgraph==0.0.20",
+    "langchain==0.3.21",
+    "langchain-google-genai==2.1.0",
+    "langgraph==0.3.18",
     
     # Google AI (최신 패키지)
-    "google_genai>=0.1.0",
+    "google-genai==1.46.0",
     
     # HTTP Client
     "httpx==0.25.2",

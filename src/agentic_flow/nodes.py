@@ -1371,13 +1371,20 @@ class SQLValidationNode(BaseNode):
                     if 'ins_datetime' not in login_log_columns:
                         issues.append("Column 'ins_datetime' not found in t_member_login_log table")
                     # t_member_login_log를 사용하는 경우는 유효함
+                elif 't_member_info' in sql_query:
+                    # t_member_info 테이블에 ins_datetime 컬럼이 있는지 확인
+                    member_info_table = actual_schema.get('t_member_info', {})
+                    member_info_columns = member_info_table.get('columns', {})
+                    if 'ins_datetime' not in member_info_columns:
+                        issues.append("Column 'ins_datetime' not found in t_member_info table")
+                        corrections.append("Verify t_member_info table schema")
                 elif 't_member' in sql_query:
-                    # t_member 테이블에 ins_datetime 컬럼이 있는지 확인
+                    # t_member 테이블에 ins_datetime 컬럼이 있는지 확인 (t_member는 ins_datetime이 없음)
                     member_table = actual_schema.get('t_member', {})
                     member_columns = member_table.get('columns', {})
                     if 'ins_datetime' not in member_columns:
                         issues.append("Column 'ins_datetime' not found in t_member table")
-                        corrections.append("Use t_member_login_log table instead of t_member for ins_datetime column")
+                        corrections.append("Use t_member_info table instead of t_member for ins_datetime column")
             
             return {
                 "is_valid": len(issues) == 0,
