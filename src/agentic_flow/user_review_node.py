@@ -36,7 +36,7 @@ class UserReviewRequest:
     estimated_execution_time: float
     estimated_row_count: int
     data_preview: Optional[List[Dict]] = None
-    created_at: datetime = None
+    created_at: Optional[datetime] = None
     
     def __post_init__(self):
         if self.created_at is None:
@@ -50,7 +50,7 @@ class UserReviewResponse:
     status: ReviewStatus
     user_feedback: Optional[str] = None
     modified_sql: Optional[str] = None
-    approved_at: datetime = None
+    approved_at: Optional[datetime] = None
     
     def __post_init__(self):
         if self.approved_at is None and self.status in [ReviewStatus.APPROVED, ReviewStatus.AUTO_APPROVED]:
@@ -93,6 +93,15 @@ class UserReviewNode:
             
             if not needs_user_review:
                 # 자동 승인 처리
+                if validation_result is None:
+                    # 기본 ValidationResult 생성
+                    validation_result = ValidationResult(
+                        status=ValidationStatus.APPROVED,
+                        confidence=0.9,
+                        issues=[],
+                        warnings=[],
+                        suggestions=[]
+                    )
                 auto_approval = self._handle_auto_approval(state, validation_result)
                 state["review_result"] = auto_approval
                 state["review_status"] = ReviewStatus.AUTO_APPROVED
@@ -100,6 +109,15 @@ class UserReviewNode:
                 return state
             
             # 사용자 검토 필요
+            if validation_result is None:
+                # 기본 ValidationResult 생성
+                validation_result = ValidationResult(
+                    status=ValidationStatus.NEEDS_REVIEW,
+                    confidence=0.5,
+                    issues=[],
+                    warnings=[],
+                    suggestions=[]
+                )
             review_request = self._create_review_request(state, validation_result)
             state["review_request"] = review_request
             state["review_status"] = ReviewStatus.PENDING
@@ -359,7 +377,10 @@ class UserReviewNode:
                 formatted_text += "```\n"
             
             formatted_text += f"\n**쿼리 ID**: {review_request.query_id}"
-            formatted_text += f"\n**생성 시간**: {review_request.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            if review_request.created_at:
+                formatted_text += f"\n**생성 시간**: {review_request.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            else:
+                formatted_text += "\n**생성 시간**: 정보 없음"
             
             return formatted_text
             

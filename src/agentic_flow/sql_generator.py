@@ -72,11 +72,18 @@ class SQLGenerator(BaseNode):
         """Initialize the LLM for SQL generation."""
         settings = get_settings()
         try:
+            from pydantic import SecretStr
+            # Handle SecretStr or plain string
+            api_key_value = settings.llm.api_key
+            if hasattr(api_key_value, 'get_secret_value'):
+                api_key_str = api_key_value.get_secret_value()  # type: ignore[attr-defined]
+            else:
+                api_key_str = str(api_key_value)
             return ChatGoogleGenerativeAI(
                 model=settings.llm.model,
-                google_api_key=settings.llm.api_key,
+                api_key=SecretStr(api_key_str),
                 temperature=0.1,  # Low temperature for consistent SQL generation
-                max_output_tokens=2048
+                max_tokens=2048
             )
         except Exception as e:
             error_msg = str(e)
@@ -89,11 +96,12 @@ class SQLGenerator(BaseNode):
             # Try to create a simple LLM instance for testing
             try:
                 import os
+                from pydantic import SecretStr
                 return ChatGoogleGenerativeAI(
                     model="gemini-2.5-pro",
-                    google_api_key=os.environ.get('GOOGLE_API_KEY', ''),
+                    api_key=SecretStr(os.environ.get('GOOGLE_API_KEY', '')),
                     temperature=0.1,
-                    max_output_tokens=1024,
+                    max_tokens=1024,
                     convert_system_message_to_human=True  # 최신 버전 호환성
                 )
             except:
@@ -111,6 +119,14 @@ class SQLGenerator(BaseNode):
             
             if not schema_mapping:
                 state["error_message"] = "Schema mapping required for SQL generation"
+                return state
+            
+            if not normalized_query:
+                state["error_message"] = "Normalized query required for SQL generation"
+                return state
+            
+            if not intent:
+                state["error_message"] = "Intent required for SQL generation"
                 return state
             
             # Generate SQL
@@ -203,7 +219,16 @@ class SQLGenerator(BaseNode):
             ]
             
             response = self.llm.invoke(messages)
-            sql_query = self._extract_sql_from_response(response.content)
+            response_content = response.content
+            # Handle different response types
+            if isinstance(response_content, str):
+                response_text = response_content
+            elif isinstance(response_content, list):
+                # Extract text from list of content blocks
+                response_text = " ".join(str(item) for item in response_content)
+            else:
+                response_text = str(response_content)
+            sql_query = self._extract_sql_from_response(response_text)
             
             return sql_query
             

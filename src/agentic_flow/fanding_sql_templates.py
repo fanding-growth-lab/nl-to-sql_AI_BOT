@@ -31,7 +31,7 @@ class SQLTemplate:
     sql_template: str
     parameters: List[str]
     analysis_type: FandingAnalysisType
-    keywords: List[str] = None  # 키워드 기반 매칭을 위한 필드 추가
+    keywords: Optional[List[str]] = None  # 키워드 기반 매칭을 위한 필드 추가
 
 
 class FandingSQLTemplates:
@@ -731,7 +731,7 @@ class FandingSQLTemplates:
         
         return None
     
-    def _calculate_keyword_score(self, query_lower: str, template_keywords: List[str]) -> float:
+    def _calculate_keyword_score(self, query_lower: str, template_keywords: Optional[List[str]]) -> float:
         """
         쿼리와 템플릿 키워드 간의 매칭 점수 계산 (Jaccard 유사도 기반, 개선됨)
         

@@ -7,7 +7,7 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import structlog
 from structlog.stdlib import LoggerFactory
 from structlog.dev import ConsoleRenderer
@@ -33,19 +33,32 @@ def configure_logging(
     
     # Use provided values or fall back to settings
     level = log_level or settings.logging.level
+    if not isinstance(level, str):
+        level = "INFO"  # Default fallback
+    
     file_path = log_file or settings.logging.file_path
     
     # Convert string level to logging constant
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     
     # Configure standard library logging with UTF-8 encoding
-    logging.basicConfig(
-        level=numeric_level,
-        format=settings.logging.format,
-        handlers=_get_log_handlers(file_path, numeric_level),
-        force=True,  # Force reconfiguration
-        encoding='utf-8'  # Ensure UTF-8 encoding for console output
-    )
+    if sys.version_info >= (3, 9):
+        # Python 3.9+ supports encoding parameter
+        logging.basicConfig(
+            level=numeric_level,
+            format=settings.logging.format,
+            handlers=_get_log_handlers(file_path, numeric_level),
+            force=True,  # Force reconfiguration
+            encoding='utf-8'  # Ensure UTF-8 encoding for console output
+        )
+    else:
+        # Python 3.8 and below - encoding not supported in basicConfig
+        logging.basicConfig(
+            level=numeric_level,
+            format=settings.logging.format,
+            handlers=_get_log_handlers(file_path, numeric_level),
+            force=True  # Force reconfiguration
+        )
     
     # Configure structlog
     processors = [
@@ -72,7 +85,7 @@ def configure_logging(
     )
 
 
-def _get_log_handlers(file_path: Optional[str], level: int) -> list:
+def _get_log_handlers(file_path: Optional[str], level: int) -> List[logging.Handler]:
     """
     Get appropriate log handlers based on configuration.
     
@@ -88,7 +101,6 @@ def _get_log_handlers(file_path: Optional[str], level: int) -> list:
     # Console handler with UTF-8 encoding
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
-    console_handler.setStream(sys.stdout)  # Ensure UTF-8 encoding
     handlers.append(console_handler)
     
     # File handler if specified
@@ -149,7 +161,7 @@ def log_function_call(func_name: str, **kwargs) -> structlog.BoundLogger:
     return logger.bind(function=func_name, **kwargs)
 
 
-def log_database_operation(operation: str, table: str = None, query: str = None, **kwargs) -> structlog.BoundLogger:
+def log_database_operation(operation: str, table: Optional[str] = None, query: Optional[str] = None, **kwargs) -> structlog.BoundLogger:
     """
     Log a database operation.
     
@@ -171,7 +183,7 @@ def log_database_operation(operation: str, table: str = None, query: str = None,
     )
 
 
-def log_slack_event(event_type: str, user: str = None, channel: str = None, **kwargs) -> structlog.BoundLogger:
+def log_slack_event(event_type: str, user: Optional[str] = None, channel: Optional[str] = None, **kwargs) -> structlog.BoundLogger:
     """
     Log a Slack event.
     
@@ -193,7 +205,7 @@ def log_slack_event(event_type: str, user: str = None, channel: str = None, **kw
     )
 
 
-def log_llm_operation(operation: str, model: str = None, tokens: int = None, **kwargs) -> structlog.BoundLogger:
+def log_llm_operation(operation: str, model: Optional[str] = None, tokens: Optional[int] = None, **kwargs) -> structlog.BoundLogger:
     """
     Log an LLM operation.
     
@@ -215,7 +227,7 @@ def log_llm_operation(operation: str, model: str = None, tokens: int = None, **k
     )
 
 
-def log_error(error: Exception, context: Dict[str, Any] = None) -> structlog.BoundLogger:
+def log_error(error: Exception, context: Optional[Dict[str, Any]] = None) -> structlog.BoundLogger:
     """
     Log an error with context.
     

@@ -12,11 +12,12 @@ import logging
 import time
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from slack_bolt.adapter.fastapi import SlackRequestHandler
 from slack_bolt import App as SlackApp
 
@@ -28,11 +29,26 @@ from core.logging import get_logger
 from core.db import DatabaseManager
 from slack.bot import create_slack_bot, get_bot_status
 from agentic_flow.auto_learning_system import AutoLearningSystem
-from agentic_flow.statistics_reporting import get_reporter, get_visualization_generator, ReportConfig
-from agentic_flow.intent_classification_stats import get_stats_collector
-
-# Initialize logger
+# Initialize logger first
 logger = get_logger(__name__)
+
+# Configure watchfiles logger to reduce noise
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+
+# Statistics modules (optional imports)
+try:
+    from agentic_flow.statistics_reporting import get_reporter, get_visualization_generator, ReportConfig
+    STATISTICS_AVAILABLE = True
+except ImportError as e:
+    STATISTICS_AVAILABLE = False
+    logger.warning(f"Statistics reporting module not available: {e}")
+
+try:
+    from agentic_flow.intent_classification_stats import get_stats_collector
+    INTENT_STATS_AVAILABLE = True
+except ImportError as e:
+    INTENT_STATS_AVAILABLE = False
+    logger.warning(f"Intent classification stats module not available: {e}")
 
 # Global variables for app state
 slack_app: Optional[SlackApp] = None
@@ -129,6 +145,8 @@ async def startup_event():
         try:
             slack_bot = create_slack_bot()
             slack_app = slack_bot.app
+            if slack_app is None:
+                raise ValueError("Slack app is None")
             slack_handler = SlackRequestHandler(slack_app)
             
             logger.info("Slack bot initialized successfully")
@@ -223,7 +241,6 @@ async def health_check():
     }
     
     try:
-        from datetime import datetime
         health_status["timestamp"] = datetime.utcnow().isoformat()
         
         # Check database connection with actual ping
@@ -231,8 +248,9 @@ async def health_check():
             try:
                 # 실제 DB 연결 테스트
                 from core.db import get_db_session
+                from sqlalchemy import text
                 with get_db_session() as session:
-                    session.execute("SELECT 1")
+                    session.execute(text("SELECT 1"))
                 health_status["components"]["database"] = "connected"
             except Exception as db_error:
                 logger.warning(f"Database health check failed: {db_error}")
@@ -412,7 +430,6 @@ async def slack_events(request: Request):
                 challenge = data.get('challenge')
                 logger.info(f"Slack URL verification challenge: {challenge}")
                 # Raw string으로 반환 (JSON으로 감싸지 않음)
-                from fastapi.responses import PlainTextResponse
                 return PlainTextResponse(content=challenge)
     except Exception as e:
         logger.debug(f"Challenge parsing failed: {e}")
@@ -497,10 +514,10 @@ async def debug_config():
     if not settings.debug:
         raise HTTPException(status_code=404, detail="Not found")
     
+    from core.config import get_environment
     return {
         "config": settings.get_masked_settings(),
-        "environment": settings.get_environment(),
-        "required_settings": settings.validate_required_settings()
+        "environment": get_environment()
         }
 
 
@@ -514,9 +531,15 @@ async def get_classification_summary():
     Returns:
         Basic classification statistics including total counts, averages, and distributions
     """
+    if not INTENT_STATS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Intent classification stats module not available")
+    
     try:
+        from agentic_flow.intent_classification_stats import get_stats_collector
         stats_collector = get_stats_collector()
         stats = stats_collector.get_stats()
+        
+        response_times = stats.response_times if stats.response_times else {"min": 0.0, "max": 0.0, "avg": 0.0}
         
         return {
             "total_classifications": stats.total_classifications,
@@ -524,9 +547,9 @@ async def get_classification_summary():
             "intent_distribution": stats.intent_distribution,
             "error_rate": stats.error_rate,
             "response_times": {
-                "min": stats.response_times.min,
-                "max": stats.response_times.max,
-                "avg": stats.response_times.avg
+                "min": response_times.get("min", 0.0),
+                "max": response_times.get("max", 0.0),
+                "avg": response_times.get("avg", 0.0)
             },
             "last_updated": stats.last_updated
         }
@@ -558,7 +581,11 @@ async def get_classification_report(
     Returns:
         Comprehensive statistics report
     """
+    if not STATISTICS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Statistics reporting module not available")
+    
     try:
+        from agentic_flow.statistics_reporting import get_reporter, ReportConfig
         reporter = get_reporter()
         config = ReportConfig(
             include_trends=include_trends,
@@ -584,7 +611,11 @@ async def get_classification_dashboard():
     Returns:
         Real-time metrics and system status for dashboard display
     """
+    if not STATISTICS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Statistics reporting module not available")
+    
     try:
+        from agentic_flow.statistics_reporting import get_reporter
         reporter = get_reporter()
         dashboard_data = reporter.generate_real_time_dashboard_data()
         return dashboard_data
@@ -608,7 +639,11 @@ async def export_classification_data(
     Returns:
         Exported classification data
     """
+    if not STATISTICS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Statistics reporting module not available")
+    
     try:
+        from agentic_flow.statistics_reporting import get_reporter
         reporter = get_reporter()
         export_data = reporter.export_statistics_data(format=format, time_range_hours=time_range_hours)
         return export_data
@@ -632,7 +667,11 @@ async def get_classification_chart_data(
     Returns:
         Chart data for visualization
     """
+    if not STATISTICS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Statistics reporting module not available")
+    
     try:
+        from agentic_flow.statistics_reporting import get_visualization_generator
         viz_generator = get_visualization_generator()
         chart_data = viz_generator.generate_chart_data(chart_type, time_range_hours)
         return chart_data
@@ -649,7 +688,11 @@ async def reset_classification_stats():
     Returns:
         Success message
     """
+    if not INTENT_STATS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Intent classification stats module not available")
+    
     try:
+        from agentic_flow.intent_classification_stats import get_stats_collector
         stats_collector = get_stats_collector()
         stats_collector.reset_stats()
         
@@ -670,30 +713,41 @@ async def get_system_health():
     """
     try:
         # Basic system health
+        db_healthy = False
+        if db_manager:
+            try:
+                test_results = db_manager.test_connections()
+                db_healthy = test_results.get('read_only', False)
+            except Exception:
+                db_healthy = False
+        
         health_status = {
             "status": "healthy",
             "timestamp": time.time(),
             "components": {
-                "database": "healthy" if db_manager and db_manager.is_connected() else "unhealthy",
+                "database": "healthy" if db_healthy else "unhealthy",
                 "slack_app": "healthy" if slack_app else "unhealthy",
                 "learning_system": "healthy" if learning_system else "unhealthy"
             }
         }
         
         # Statistics system health
-        try:
-            stats_collector = get_stats_collector()
-            stats = stats_collector.get_stats()
-            
-            health_status["components"]["statistics_system"] = "healthy"
-            health_status["statistics"] = {
-                "total_classifications": stats.total_classifications,
-                "uptime_hours": (time.time() - stats.start_time) / 3600 if stats.start_time > 0 else 0,
-                "last_activity": stats.last_updated
-            }
-        except Exception as e:
-            health_status["components"]["statistics_system"] = "unhealthy"
-            health_status["statistics_error"] = str(e)
+        if INTENT_STATS_AVAILABLE:
+            try:
+                from agentic_flow.intent_classification_stats import get_stats_collector
+                stats_collector = get_stats_collector()
+                stats = stats_collector.get_stats()
+                
+                health_status["components"]["statistics_system"] = "healthy"
+                health_status["statistics"] = {
+                    "total_classifications": stats.total_classifications,
+                    "last_activity": stats.last_updated
+                }
+            except Exception as e:
+                health_status["components"]["statistics_system"] = "unhealthy"
+                health_status["statistics_error"] = str(e)
+        else:
+            health_status["components"]["statistics_system"] = "unavailable"
         
         # Overall health determination
         unhealthy_components = [
@@ -798,7 +852,8 @@ def main():
         host=args.host,
         port=args.port,
         reload=reload_enabled,
-        log_level=args.log_level
+        log_level=args.log_level,
+        reload_excludes=["logs/*", "*.log", "__pycache__/*", "*.pyc", "*.pyo"]
     )
 
 

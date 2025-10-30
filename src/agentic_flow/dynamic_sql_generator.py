@@ -5,6 +5,7 @@ LLM을 사용한 동적 SQL 생성기
 """
 
 import re
+import json
 import logging
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 
 from .nodes import BaseNode
+from agentic_flow.llm_service import get_llm_service
+from agentic_flow.state import GraphState
 # Removed: from .date_utils import DateUtils (deleted module)
 
 
@@ -31,11 +34,12 @@ class DynamicSQLGenerator(BaseNode):
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.llm = self._initialize_llm()
+        self.llm_service = get_llm_service()
+        self.llm = self.llm_service.get_sql_llm()
         self._setup_prompt()
     
     def _initialize_llm(self) -> Optional[ChatGoogleGenerativeAI]:
-        """LLM 초기화"""
+        """LLM 초기화 (deprecated - use llm_service)"""
         try:
             # API 키 확인
             api_key = self.config.get('llm', {}).get('api_key', '')
@@ -43,17 +47,14 @@ class DynamicSQLGenerator(BaseNode):
                 self.logger.error("Google API key not found in config")
                 return None
             
+            from pydantic import SecretStr
             # LLM 초기화 (지원되는 모델 사용)
             llm = ChatGoogleGenerativeAI(
                 model=self.config.get('llm', {}).get('model', 'gemini-1.5-pro'),  # 지원되는 모델
-                google_api_key=api_key,
+                api_key=SecretStr(api_key),
                 temperature=0.1,
-                max_output_tokens=512,  # 토큰 수 줄임
-                request_timeout=15.0,  # 타임아웃 증가
-                convert_system_message_to_human=True,  # 최신 버전 호환성
-                model_kwargs={
-                    "response_mime_type": "application/json"
-                }
+                max_tokens=512,  # 토큰 수 줄임
+                timeout=15.0,  # 타임아웃 증가
             )
             
             self.logger.info(f"LLM initialized successfully: {self.config.get('llm', {}).get('model', 'gemini-2.5-pro')}")
@@ -120,7 +121,15 @@ JSON 형식으로만 응답:
                     return None
                 
             else:
-                response_content = response.content
+                response_content_raw = response.content
+                # Handle different response types
+                if isinstance(response_content_raw, str):
+                    response_content = response_content_raw
+                elif isinstance(response_content_raw, list):
+                    # Extract text from list of content blocks
+                    response_content = " ".join(str(item) for item in response_content_raw)
+                else:
+                    response_content = str(response_content_raw)
                 
             if not response_content:
                 # 후보/메타 내 텍스트 재시도
@@ -135,31 +144,29 @@ JSON 형식으로만 응답:
                 self.logger.info("Using alternative text from response metadata (empty content)")
                 response_content = alt_text
             
-            self.logger.info(f"LLM Response length: {len(response.content)}")
-            self.logger.info(f"LLM Response content: {response.content[:200]}...")
-            self.logger.info(f"Full LLM Response: {repr(response.content)}")
+            # Log response content safely
+            response_content_str = str(response_content) if response_content else ""
+            self.logger.info(f"LLM Response length: {len(response_content_str)}")
+            self.logger.info(f"LLM Response content: {response_content_str[:200]}...")
+            self.logger.info(f"Full LLM Response: {repr(response_content_str)}")
             
             # JSON 파싱 (디버깅 추가)
             try:
-                import json
                 # 응답 내용 정리
-                cleaned_content = response.content.strip()
+                cleaned_content = response_content_str.strip()
                 self.logger.info(f"Cleaned content: {cleaned_content[:200]}...")
                 
                 result_data = json.loads(cleaned_content)
-                self.logger.info(f"JSON parsing successful: {result_data}")
             except json.JSONDecodeError as e:
-                self.logger.warning(f"JSON parsing failed: {str(e)}")
-                self.logger.warning(f"Response content: {response.content}")
                 # JSON 파싱 실패 시 텍스트에서 추출
-                result_data = self._extract_json_from_text(response.content)
+                result_data = self._extract_json_from_text(response_content_str)
                 self.logger.info(f"Extracted from text: {result_data}")
             except Exception as e:
                 self.logger.error(f"Unexpected error in JSON parsing: {str(e)}")
-                self.logger.error(f"Response content: {response.content}")
-                self.logger.error(f"Response content repr: {repr(response.content)}")
+                self.logger.error(f"Response content: {response_content_str}")
+                self.logger.error(f"Response content repr: {repr(response_content_str)}")
                 # 예상치 못한 에러 시 텍스트에서 추출
-                result_data = self._extract_json_from_text(response.content)
+                result_data = self._extract_json_from_text(response_content_str)
                 self.logger.info(f"Extracted from text: {result_data}")
             
             if not result_data:
@@ -297,7 +304,6 @@ JSON 형식으로만 응답:
             ]
             
             for pattern in sql_patterns:
-                import re
                 match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
                 if match:
                     result["sql_query"] = match.group(1) if match.groups() else match.group(0)
@@ -425,7 +431,7 @@ JSON 형식으로만 응답:
         FROM t_member
         """
     
-    def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def process(self, state: GraphState) -> GraphState:
         """동적 SQL 생성 처리"""
         self._log_processing(state, "DynamicSQLGenerator")
         
@@ -439,8 +445,9 @@ JSON 형식으로만 응답:
             result = self.generate_dynamic_sql(user_query)
             
             if result:
-                # 결과를 state에 저장
-                state["dynamic_sql_result"] = {
+                # 결과를 state에 저장 (GraphState는 TypedDict이므로 dict로 캐스팅)
+                state_dict: Dict[str, Any] = state  # type: ignore[assignment]
+                state_dict["dynamic_sql_result"] = {
                     "sql_query": result.sql_query,
                     "confidence": result.confidence,
                     "reasoning": result.reasoning,
@@ -451,10 +458,12 @@ JSON 형식으로만 응답:
                 self.logger.debug(f"Generated SQL: {result.sql_query}")
             else:
                 self.logger.warning("Dynamic SQL generation failed")
-                state["dynamic_sql_result"] = None
+                state_dict: Dict[str, Any] = state  # type: ignore[assignment]
+                state_dict["dynamic_sql_result"] = None
             
         except Exception as e:
             self.logger.error(f"Error in dynamic SQL generation: {str(e)}")
-            state["dynamic_sql_result"] = None
+            state_dict: Dict[str, Any] = state  # type: ignore[assignment]
+            state_dict["dynamic_sql_result"] = None
         
         return state

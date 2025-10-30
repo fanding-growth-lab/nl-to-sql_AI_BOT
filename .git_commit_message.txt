@@ -1,0 +1,59 @@
+refactor: 타입 안전성 개선 및 LLM 서비스 중앙화 리팩토링
+
+주요 변경사항:
+- 타입 체크 오류 전면 수정 (프로젝트 전반)
+- LLM 서비스 초기화 중앙화 (BaseNode에 통합)
+- 사용자 컨텍스트 전달 개선 (user_id, session_id)
+- watchfiles 로그 중복 문제 해결
+- 기타 버그 수정 및 코드 품질 개선
+
+상세 변경사항:
+1. 타입 안전성 개선:
+   - Optional 타입 명시적 처리 및 None 체크 추가
+   - TypedDict 필드 추가 및 타입 검증 강화
+   - SQLAlchemy 컨텍스트 매니저 타입 수정
+   - 안전한 속성 접근 (getattr, isinstance) 적용
+
+2. LLM 서비스 중앙화:
+   - BaseNode에 _get_llm_service, _get_intent_llm, _get_sql_llm 메서드 추가
+   - NLProcessor, SQLGenerationNode, DataSummarizationNode의 중복 코드 제거
+   - 일관된 LLM 인스턴스 관리
+
+3. 사용자 컨텍스트 개선:
+   - llm_intent_classifier.py: user_query를 통계 수집에 전달
+   - message_handler.py: user_id, channel_id 추출 및 전달 개선
+   - session_id 생성 로직 개선 (thread_ts 기반)
+
+4. 버그 수정:
+   - watchfiles 로그 중복 문제 해결 (reload_excludes, 로그 레벨 조정)
+   - statistics_persistence.py: _get_db_connection 컨텍스트 매니저 추가
+   - user_review_node.py: Optional[datetime] 타입 처리
+   - logging.py: Python 버전 호환성 개선
+
+5. 코드 품질:
+   - ChatGoogleGenerativeAI 파라미터 수정 (api_key, max_tokens, timeout)
+   - response.content 타입 처리 개선 (str/list 지원)
+   - GraphState TypedDict 인스턴스화 수정
+
+변경된 파일: 19개
+  - src/agentic_flow/dynamic_sql_generator.py
+  - src/agentic_flow/fanding_sql_templates.py
+  - src/agentic_flow/graph/runner.py
+  - src/agentic_flow/graph/state_machine.py
+  - src/agentic_flow/graph/utils.py
+  - src/agentic_flow/llm_intent_classifier.py
+  - src/agentic_flow/llm_service.py
+  - src/agentic_flow/monitoring.py
+  - src/agentic_flow/nodes.py
+  - src/agentic_flow/sql_generator.py
+  - src/agentic_flow/state.py
+  - src/agentic_flow/statistics_persistence.py
+  - src/agentic_flow/user_review_node.py
+  - src/core/logging.py
+  - src/debug.py
+  - src/main.py
+  - src/slack/handlers/message_handler.py
+  - 기타
+
+통계: +467줄 추가, -293줄 삭제
+

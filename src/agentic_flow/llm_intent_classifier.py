@@ -16,9 +16,11 @@ from langchain_core.prompts import ChatPromptTemplate
 # Removed: JsonOutputParser (not used)
 
 from .nodes import BaseNode, QueryIntent
+from .state import GraphState
+from agentic_flow.llm_service import get_llm_service
+from agentic_flow.intent_classification_stats import get_integrator, QueryInteractionMetrics, get_classification_stats
 from typing import Dict, Any, Optional
 from core.config import get_settings
-from .intent_classification_stats import get_stats_collector
 
 
 @dataclass
@@ -41,12 +43,13 @@ class LLMIntentClassifier(BaseNode):
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.llm = self._initialize_llm()
+        self.llm_service = get_llm_service()
+        self.llm = self.llm_service.get_intent_llm()
         # Removed: JsonOutputParser (not used)
         self._setup_prompt()
     
     def _initialize_llm(self) -> Optional[ChatGoogleGenerativeAI]:
-        """빠른 LLM 모델 초기화"""
+        """빠른 LLM 모델 초기화 (deprecated - use llm_service)"""
         try:
             # 설정에서 인텐트 분류용 LLM 설정 가져오기
             settings = get_settings()
@@ -56,12 +59,13 @@ class LLMIntentClassifier(BaseNode):
                            f"max_tokens={settings.llm.intent_max_tokens}")
             
             # 인텐트 분류용 빠른 모델 사용
+            from pydantic import SecretStr
             return ChatGoogleGenerativeAI(
                 model=settings.llm.intent_model,
-                google_api_key=settings.llm.api_key,
+                api_key=SecretStr(settings.llm.api_key) if settings.llm.api_key else None,
                 temperature=settings.llm.intent_temperature,
-                max_output_tokens=settings.llm.intent_max_tokens,
-                request_timeout=10.0,
+                max_tokens=settings.llm.intent_max_tokens,
+                timeout=10.0,
             )
         except Exception as e:
             self.logger.warning(f"Failed to initialize LLM for intent classification: {str(e)}")
@@ -86,13 +90,15 @@ JSON 응답:
             ("human", "쿼리: {query}")
         ])
     
-    def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def process(self, state: GraphState) -> GraphState:
         """인텐트 분류 처리"""
         self._log_processing(state, "LLMIntentClassifier")
         
         # 통계 수집을 위한 시작 시간 기록
         start_time = time.time()
         is_error = False
+        classification_result: Optional[IntentClassificationResult] = None
+        user_query: Optional[str] = None  # Initialize user_query for finally block
         
         try:
             user_query = state.get("user_query")
@@ -110,15 +116,15 @@ JSON 응답:
                 return state
             
             # LLM으로 인텐트 분류
-            result = self._classify_intent_with_llm(user_query)
+            classification_result = self._classify_intent_with_llm(user_query)
             
             # 결과를 state에 저장
-            state["llm_intent_result"] = result.to_dict() if result else None
+            state["llm_intent_result"] = classification_result.to_dict() if classification_result else None
             
             # 로깅
-            if result:
-                self.logger.info(f"LLM Intent Classification: {result.intent.value} (confidence: {result.confidence:.2f})")
-                self.logger.debug(f"Reasoning: {result.reasoning}")
+            if classification_result:
+                self.logger.info(f"LLM Intent Classification: {classification_result.intent.value} (confidence: {classification_result.confidence:.2f})")
+                self.logger.debug(f"Reasoning: {classification_result.reasoning}")
             else:
                 self.logger.warning("LLM intent classification failed")
                 is_error = True
@@ -127,28 +133,44 @@ JSON 응답:
             self.logger.error(f"Error in LLM intent classification: {str(e)}")
             state["llm_intent_result"] = None
             is_error = True
+            classification_result = None
         
         finally:
-            # 통계 수집
-            self._record_classification_stats(result, start_time, is_error)
+            # 통계 수집 (user_query가 있을 때만)
+            if user_query:
+                self._record_classification_stats(user_query, classification_result, start_time, is_error)
         
         return state
     
     def _classify_intent_with_llm(self, query: str) -> Optional[IntentClassificationResult]:
         """LLM을 사용한 인텐트 분류"""
         try:
+            if self.llm is None:
+                self.logger.warning("LLM not available for intent classification")
+                return None
+                
             # 프롬프트 생성
             formatted_prompt = self.prompt.format(query=query)
             
             # LLM 호출
             response = self.llm.invoke(formatted_prompt)
             
+            # response.content가 str인지 확인
+            response_text: str
+            if isinstance(response.content, str):
+                response_text = response.content
+            elif isinstance(response.content, list):
+                # 리스트인 경우 첫 번째 요소를 문자열로 변환
+                response_text = str(response.content[0]) if response.content else ""
+            else:
+                response_text = str(response.content)
+            
             # JSON 파싱
             try:
-                result_data = json.loads(response.content)
+                result_data = json.loads(response_text)
             except json.JSONDecodeError:
                 # JSON 파싱 실패 시 텍스트에서 추출 시도
-                result_data = self._extract_json_from_text(response.content)
+                result_data = self._extract_json_from_text(response_text)
             
             if not result_data:
                 return None
@@ -185,7 +207,7 @@ JSON 응답:
         
         return None
     
-    def _record_classification_stats(self, result: Optional[IntentClassificationResult], 
+    def _record_classification_stats(self, user_query: str, result: Optional[IntentClassificationResult], 
                                    start_time: float, is_error: bool) -> None:
         """통계 수집 메서드"""
         try:
@@ -198,31 +220,29 @@ JSON 응답:
                 intent = "UNKNOWN"
                 confidence = 0.0
             
-            # 통계 수집기 가져오기 및 기록
-            stats_collector = get_stats_collector()
-            stats_collector.record_classification(
-                intent=intent,
-                confidence=confidence,
-                response_time_ms=response_time_ms,
-                is_error=is_error
-            )
+            # 통합 시스템에 기록 (QueryInteractionMetrics 사용)
+            try:
+                # QueryInteractionMetrics 생성
+                metrics = QueryInteractionMetrics(
+                    user_query=user_query,  # 사용자 쿼리 전달
+                    intent=intent,
+                    intent_confidence=confidence,
+                    response_time_ms=response_time_ms,
+                    timestamp=time.time(),
+                    is_error=is_error
+                )
+                
+                # 통합 시스템에 기록
+                integrator = get_integrator()
+                integrator.record_complete_query_interaction(metrics)
+                
+            except Exception as e:
+                # 통합 시스템을 사용할 수 없는 경우 로그만 기록
+                self.logger.warning(f"Intent classification stats integration failed: {e}")
             
         except Exception as e:
             self.logger.warning(f"Failed to record classification stats: {e}")
     
     def get_classification_stats(self) -> Dict[str, Any]:
-        """분류 통계 반환"""
-        try:
-            stats_collector = get_stats_collector()
-            stats = stats_collector.get_stats()
-            return stats.to_dict()
-        except Exception as e:
-            self.logger.error(f"Failed to get classification stats: {e}")
-            return {
-                "total_classifications": 0,
-                "average_confidence": 0.0,
-                "intent_distribution": {},
-                "error_rate": 0.0,
-                "response_times": {"min": 0, "max": 0, "avg": 0},
-                "last_updated": 0
-            }
+        """분류 통계 반환 (AutoLearning 통합)"""
+        return get_classification_stats()

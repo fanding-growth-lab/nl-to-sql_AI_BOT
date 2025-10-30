@@ -8,12 +8,14 @@ import re
 import logging
 import sqlparse
 import random
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
+from dotenv import load_dotenv
 
 from .prompts import GeminiSQLGenerator, SQLPromptTemplate
 from .fanding_sql_templates import FandingSQLTemplates
@@ -270,6 +272,7 @@ class BaseNode(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.logger = get_logger(self.__class__.__name__)
+        self._llm_service = None  # Lazy initialization
     
     @abstractmethod
     def process(self, state: GraphState) -> GraphState:
@@ -284,6 +287,21 @@ class BaseNode(ABC):
             channel_id=state.get("channel_id"),
             query=state.get("user_query", "")[:100]
         )
+    
+    def _get_llm_service(self):
+        """Get LLM service instance (lazy initialization)."""
+        if self._llm_service is None:
+            from agentic_flow.llm_service import get_llm_service
+            self._llm_service = get_llm_service()
+        return self._llm_service
+    
+    def _get_intent_llm(self):
+        """Get intent classification LLM (lightweight, fast response)."""
+        return self._get_llm_service().get_intent_llm()
+    
+    def _get_sql_llm(self):
+        """Get SQL generation LLM (high-performance model)."""
+        return self._get_llm_service().get_sql_llm()
 
 
 class NLProcessor(BaseNode):
@@ -291,37 +309,12 @@ class NLProcessor(BaseNode):
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.llm = self._initialize_llm()
+        # Use centralized LLM service for intent classification
+        self.llm = self._get_intent_llm()
         self.fanding_templates = FandingSQLTemplates()
         # Removed: EnhancedRAGMapper and DynamicSchemaExpander (deleted modules)
         # self.rag_mapper = EnhancedRAGMapper(config)
         # self.schema_expander = DynamicSchemaExpander(config)
-    
-    def _initialize_llm(self):
-        """Initialize the LLM for natural language processing."""
-        settings = get_settings()
-        try:
-            return ChatGoogleGenerativeAI(
-                model=settings.llm.model,
-                google_api_key=settings.llm.api_key,
-                temperature=settings.llm.temperature,
-                max_output_tokens=settings.llm.max_tokens,
-                request_timeout=10.0  # 10초 타임아웃 설정
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize LLM: {str(e)}. Using mock LLM.")
-            # Try to create a simple LLM instance for testing
-            try:
-                import os
-                return ChatGoogleGenerativeAI(
-                    model="gemini-2.5-pro",
-                    google_api_key=os.environ.get('GOOGLE_API_KEY', ''),
-                    temperature=0.1,
-                    max_output_tokens=1024,
-                    request_timeout=10.0  # 10초 타임아웃 설정
-                )
-            except:
-                return None
     
     def process(self, state: GraphState) -> GraphState:
         """Process natural language query and extract intent and entities."""
@@ -332,8 +325,14 @@ class NLProcessor(BaseNode):
             user_query = state.get("user_query")
             if not user_query:
                 self.logger.error("user_query is None or empty")
-                state["conversation_response"] = "죄송합니다. 질문을 받지 못했어요. 다시 말씀해주세요! 😊"
+                # 재입력 요청 설정
+                state["conversation_response"] = (
+                    "죄송합니다. 질문을 받지 못했어요. 😊\n\n"
+                    "다시 질문해주시면 처리해드리겠습니다.\n"
+                    "예시: '9월 신규 회원 현황 알려줘', '활성 회원 수 조회해줘'"
+                )
                 state["skip_sql_generation"] = True
+                state["needs_clarification"] = True  # 재입력 필요 플래그 설정
                 state["success"] = False
                 return state
             
@@ -343,8 +342,14 @@ class NLProcessor(BaseNode):
             # 정규화된 쿼리 검증
             if not normalized_query or len(normalized_query.strip()) == 0:
                 self.logger.error("normalized_query is empty after processing")
-                state["conversation_response"] = "죄송합니다. 질문을 이해하지 못했어요. 다시 말씀해주세요! 🤔"
+                # 재입력 요청 설정
+                state["conversation_response"] = (
+                    "죄송합니다. 질문을 이해하지 못했어요. 🤔\n\n"
+                    "다시 질문해주시면 처리해드리겠습니다.\n"
+                    "예시: '9월 신규 회원 현황 알려줘', '활성 회원 수 조회해줘'"
+                )
                 state["skip_sql_generation"] = True
+                state["needs_clarification"] = True  # 재입력 필요 플래그 설정
                 state["success"] = False
                 return state
             
@@ -452,6 +457,8 @@ class NLProcessor(BaseNode):
             clarification_question = self.fanding_templates.generate_clarification_question(user_query)
             state["conversation_response"] = clarification_question
             state["skip_sql_generation"] = True
+            state["needs_clarification"] = True  # 재입력 필요 플래그 설정
+            state["success"] = True  # 명확화 질문 생성 성공 (정상 처리)
             self.logger.info("✅ Generated clarification question for ambiguous query (this is normal behavior)")
             return
         
@@ -475,6 +482,7 @@ class NLProcessor(BaseNode):
             self.logger.info(f"Fanding template matched: {fanding_template.name}")
             set_fanding_template(state, fanding_template)
             state["skip_sql_generation"] = False
+            state["success"] = True  # 템플릿 매칭 성공
             self.logger.info(f"SQL template applied: {fanding_template.sql_template}")
         else:
             # 3. 동적 월별 템플릿 생성 시도 (멤버십 성과 관련)
@@ -484,6 +492,7 @@ class NLProcessor(BaseNode):
                     self.logger.info(f"Dynamic monthly template created: {dynamic_template.name}")
                     set_fanding_template(state, dynamic_template)
                     state["skip_sql_generation"] = False
+                    state["success"] = True  # 동적 템플릿 생성 성공
                     self.logger.info(f"Dynamic SQL applied: {dynamic_template.sql_template[:100]}...")
                     return
             except Exception as e:
@@ -492,101 +501,8 @@ class NLProcessor(BaseNode):
             # 4. 모든 방법 실패 시 일반 SQL 생성으로 진행
             self.logger.info("No template/pattern matched, proceeding with general SQL generation")
             state["skip_sql_generation"] = False
+            state["success"] = True  # 일반 SQL 생성으로 진행 (정상 처리)
 
-    def _generate_conversation_response(self, intent: QueryIntent, query: str) -> str:
-        """인텐트별 대화 응답 생성 (기존 메서드 유지)"""
-        if intent == QueryIntent.GREETING:
-            return """안녕하세요! 👋 팬딩 데이터 리포트 시스템을 돕는 AI 어시스턴트, PF_bearbot이라고 해요.
-
-저는 크리에이터님의 데이터를 분석해서 궁금한 점들을 바로바로 알려드리는 역할을 하고 있어요.
-
-제가 주로 도와드릴 수 있는 것들이에요.
-
-멤버십 데이터 분석: 회원 수나 신규/이탈 현황이 어떤지 알려드려요.
-
-월간 성과 리포트: 매출이나 방문자, 리텐션 같은 핵심 성과를 정리해 드려요.
-
-콘텐츠 성과 분석: 어떤 포스트가 인기가 많았는지 조회수를 바탕으로 알려드릴 수 있어요.
-
-자동 리포트 생성: 매월 크리에이터님께 꼭 맞는 리포트를 만들어 드려요.
-
-예를 들어, 저에게 이렇게 한번 물어보세요.
-
-"8월 멤버십 성과 어땠어?"
-
-"회원 수 변화 추이 보여줘"
-
-"인기 포스트 TOP5 알려줘"
-
-"리텐션 현황은?"
-
-물론 "월별 매출 성장률"이나 "고객 평균 수명(LTV) 분석" 같은 좀 더 깊이 있는 분석도 가능하답니다.
-
-궁금한 게 생기면 언제든 편하게 저를 찾아주세요! 🤖"""
-        
-        elif intent == QueryIntent.HELP_REQUEST:
-            return """🔍 **PF_bearbot 도움말 - Fanding Data Report**
-
-**🚀 주요 기능:**
-• 📊 **멤버십 데이터 분석**: 회원 수, 신규/이탈, 활성도 분석
-• 📈 **성과 리포트**: 월간 매출, 방문자, 리텐션 분석
-• 🔍 **콘텐츠 성과**: 포스트 조회수, 인기 콘텐츠 분석
-• 📋 **자동 리포트**: 크리에이터 맞춤형 월간 리포트 생성
-
-**💡 기본 사용법:**
-```
-"8월 멤버십 성과" → 월간 성과 리포트
-"회원 수 변화 추이" → 회원 증감 분석
-"인기 포스트 TOP5" → 콘텐츠 성과 분석
-"리텐션 현황" → 회원 유지율 분석
-```
-
-**🎯 고급 분석 예시:**
-• "월별 매출 성장률 분석"
-• "멤버십 구독 기간 분포"
-• "고객 평균 수명 분석"
-• "포스트 발행과 방문자 상관관계"
-• "신규 vs 기존 회원 비율"
-
-**⚡ 빠른 명령어:**
-• "도움말" → 이 도움말 표시
-• "성과" → 최근 성과 요약
-• "분석" → 사용 가능한 분석 목록
-
-더 궁금한 것이 있으시면 언제든 물어보세요! 🤖"""
-        
-        elif intent == QueryIntent.GENERAL_CHAT:
-            return """안녕하세요! 😊
-
-저는 **PF_bearbot**입니다! 크리에이터를 위한 **Fanding Data Report** 시스템을 도와드리는 AI 어시스턴트예요.
-
-**🚀 무엇을 도와드릴까요?**
-• 📊 **멤버십 데이터 분석**: 회원 수, 신규/이탈, 활성도 분석
-• 📈 **성과 리포트**: 월간 매출, 방문자, 리텐션 분석
-• 🔍 **콘텐츠 성과**: 포스트 조회수, 인기 콘텐츠 분석
-• 📋 **자동 리포트**: 크리에이터 맞춤형 월간 리포트 생성
-
-**💡 간단한 예시:**
-• "8월 멤버십 성과"
-• "회원 수 변화 추이"
-• "인기 포스트 TOP5"
-• "리텐션 현황"
-
-구체적인 질문을 해주시면 정확한 답변을 드릴게요! 🤖"""
-        
-        else:
-            return """안녕하세요! 👋
-
-저는 **PF_bearbot**입니다! 크리에이터를 위한 **Fanding Data Report** 시스템을 도와드리는 AI 어시스턴트예요.
-
-**🚀 주요 기능:**
-• 📊 멤버십 데이터 분석
-• 📈 성과 리포트 생성
-• 🔍 콘텐츠 성과 분석
-• 📋 자동 리포트 생성
-
-구체적인 질문을 해주시면 정확한 답변을 드릴게요! 🤖"""
-    
     def _normalize_query(self, query: str) -> str:
         """Normalize the user query."""
         # Remove extra whitespace
@@ -781,7 +697,16 @@ class NLProcessor(BaseNode):
             ]
             
             response = self.llm.invoke(messages)
-            result = self._parse_llm_response(response.content)
+            response_content = response.content
+            # Handle different response types
+            if isinstance(response_content, str):
+                response_text = response_content
+            elif isinstance(response_content, list):
+                # Extract text from list of content blocks
+                response_text = " ".join(str(item) for item in response_content)
+            else:
+                response_text = str(response_content)
+            result = self._parse_llm_response(response_text)
             
             intent = QueryIntent(result.get("intent", "UNKNOWN"))
             entities = [
@@ -990,9 +915,9 @@ class SQLGenerationNode(BaseNode):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.db_schema = config.get("db_schema", {})
-    
-        # GeminiSQLGenerator 초기화
-        self.sql_generator = self._initialize_sql_generator()
+        
+        # LLM 서비스에서 SQL LLM 가져오기
+        self.llm = self._get_sql_llm()
         
         # SQLPromptTemplate 초기화
         self.prompt_template = SQLPromptTemplate(db_schema=self.db_schema)
@@ -1000,20 +925,6 @@ class SQLGenerationNode(BaseNode):
         # FandingSQLTemplates 초기화
         from .fanding_sql_templates import FandingSQLTemplates
         self.fanding_templates = FandingSQLTemplates()
-        
-    def _initialize_sql_generator(self):
-        """SQL 생성기 초기화"""
-        try:
-            # 환경 변수에서 직접 API 키 가져오기
-            import os
-            from dotenv import load_dotenv
-            load_dotenv()
-            api_key = os.getenv("GOOGLE_API_KEY")
-            
-            return GeminiSQLGenerator(api_key=api_key)
-        except Exception as e:
-            self.logger.error(f"Failed to initialize SQL generator: {e}")
-            return None
     
     def process(self, state: GraphState) -> GraphState:
         """자연어 쿼리를 SQL로 변환"""
@@ -1051,15 +962,15 @@ class SQLGenerationNode(BaseNode):
             slots = {**prior_slots, **{k: v for k, v in new_slots.items() if v}}
             state["slots"] = slots
             
-            # 스키마 매핑 정보를 SQL 생성기에 설정
-            if schema_mapping and self.sql_generator:
+            # 스키마 매핑 정보를 프롬프트 템플릿에 설정
+            if schema_mapping:
                 # 관련 테이블 정보를 스키마에 추가
                 relevant_schema = {}
                 for table_name in schema_mapping.relevant_tables:
                     if table_name in self.db_schema:
                         relevant_schema[table_name] = self.db_schema[table_name]
                 
-                self.sql_generator.set_schema(relevant_schema)
+                self.prompt_template.set_schema(relevant_schema)
             
             # 1. 동적 SQL 생성 시도 (월별 쿼리 등)
             dynamic_sql_result = state.get("dynamic_sql_result")
@@ -1111,8 +1022,9 @@ class SQLGenerationNode(BaseNode):
                         "크리에이터 식별 컬럼을 확인할 수 없습니다. 어떤 컬럼으로 그룹핑할까요? 예: creator_id/creator_no"
                     )
                     state["clarification_question"] = clarification
-                    state["conversation_response"] = True
-                    state["conversation_text"] = clarification
+                    state["conversation_response"] = clarification
+                    state["skip_sql_generation"] = True
+                    state["needs_clarification"] = True  # 재입력 필요 플래그 설정
                     state["confidence_scores"]["sql_generation"] = 0.0
                     return state
             
@@ -1124,6 +1036,7 @@ class SQLGenerationNode(BaseNode):
                 self.logger.info(f"SQL already exists, skipping generation: {existing_sql[:100]}...")
                 state["confidence_scores"]["sql_generation"] = 1.0
                 return state
+                
             elif existing_sql and sql_validation_failed:
                 self.logger.info(f"Previous SQL validation failed, generating new SQL...")
                 # SQL 검증 실패 시 새로운 SQL 생성
@@ -1131,26 +1044,49 @@ class SQLGenerationNode(BaseNode):
                 state["sql_validation_failed"] = False
             
             # SQL 생성
-            if self.sql_generator:
-                result = self.sql_generator.generate_sql(user_query)
-                
-                if result["success"]:
-                    state["sql_query"] = result["sql"]
-                    state["sql_generation_metadata"] = {
-                        "model": result.get("model"),
-                        "prompt_length": result.get("prompt_length"),
-                        "response_length": result.get("response_length"),
-                        "mock": result.get("mock", False)
-                    }
+            if self.llm:
+                try:
+                    # 프롬프트 생성
+                    prompt = self.prompt_template.create_prompt(user_query)
                     
-                    # 신뢰도 점수 계산
-                    confidence = self._calculate_sql_confidence(result, schema_mapping)
-                    state["confidence_scores"]["sql_generation"] = confidence
-            
-                    self.logger.info(f"Generated SQL: {result['sql']}")
-                else:
+                    # LLM 호출
+                    response = self.llm.invoke(prompt)
+                    response_content = response.content
+                    # Handle different response types
+                    if isinstance(response_content, str):
+                        sql_query = response_content.strip()
+                    elif isinstance(response_content, list):
+                        # Extract text from list of content blocks
+                        sql_query = " ".join(str(item) for item in response_content).strip()
+                    else:
+                        sql_query = str(response_content).strip()
+                    
+                    # SQL 추출 (```sql ... ``` 형태에서 추출)
+                    if "```sql" in sql_query:
+                        sql_query = sql_query.split("```sql")[1].split("```")[0].strip()
+                    elif "```" in sql_query:
+                        sql_query = sql_query.split("```")[1].split("```")[0].strip()
+                    
+                    if sql_query:
+                        state["sql_query"] = sql_query
+                        state["sql_generation_metadata"] = {
+                            "model": self.llm.model,
+                            "prompt_length": len(str(prompt)),
+                            "response_length": len(sql_query),
+                            "mock": False
+                        }
+                        
+                        # 신뢰도 점수 계산
+                        confidence = self._calculate_sql_confidence({"sql": sql_query, "success": True}, schema_mapping)
+                        state["confidence_scores"]["sql_generation"] = confidence
+                        
+                        self.logger.info(f"Generated SQL: {sql_query}")
+                    else:
+                        raise Exception("Empty SQL response from LLM")
+                        
+                except Exception as e:
                     # SQL 생성 실패 시 Fanding 템플릿 시도
-                    self.logger.warning(f"SQL generation failed: {result.get('error', 'Unknown error')}")
+                    self.logger.warning(f"SQL generation failed: {str(e)}")
                     self.logger.info("Attempting Fanding template fallback...")
                     
                     fanding_template = self.fanding_templates.match_query_to_template(user_query)
@@ -1163,18 +1099,20 @@ class SQLGenerationNode(BaseNode):
                         # DATA_QUERY인데 생성 실패 시: 명확화 질문 요청
                         clarification = self._build_clarification_question(user_query)
                         state["clarification_question"] = clarification
-                        state["conversation_response"] = clarification  # 문자열로 설정
-                        state["conversation_text"] = clarification
+                        state["conversation_response"] = clarification
+                        state["skip_sql_generation"] = True
+                        state["needs_clarification"] = True  # 재입력 필요 플래그 설정
                         state["confidence_scores"]["sql_generation"] = 0.0
                         self.logger.info("Asking clarification instead of switching to generic conversation")
             else:
-                # SQL 생성기 없음: 명확화 질문 요청
+                # LLM 없음: 명확화 질문 요청
                 clarification = self._build_clarification_question(user_query)
                 state["clarification_question"] = clarification
-                state["conversation_response"] = clarification  # 문자열로 설정
-                state["conversation_text"] = clarification
+                state["conversation_response"] = clarification
+                state["skip_sql_generation"] = True
+                state["needs_clarification"] = True  # 재입력 필요 플래그 설정
                 state["confidence_scores"]["sql_generation"] = 0.0
-                self.logger.warning("No SQL generator available, asking for clarification")
+                self.logger.warning("No LLM available, asking for clarification")
             
         except Exception as e:
             self.logger.error(f"Error in SQLGenerationNode: {str(e)}")
@@ -1298,7 +1236,7 @@ class SQLValidationNode(BaseNode):
                 if corrected_sql != sql_query:
                     self.logger.info(f"SQL auto-corrected: {sql_query[:100]}... -> {corrected_sql[:100]}...")
                     state["sql_query"] = corrected_sql
-                    state["sql_corrected"] = True
+                    state["sql_corrected"] = corrected_sql
             
             # 종합 검증 결과
             is_valid = all([
@@ -1503,29 +1441,12 @@ class DataSummarizationNode(BaseNode):
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.llm = self._initialize_llm()
+        
+        # LLM 서비스에서 SQL LLM 가져오기 (요약용으로도 사용)
+        self.llm = self._get_sql_llm()
+        
         # Removed: DataInsightAnalyzer (deleted module)
         # self.insight_analyzer = DataInsightAnalyzer(config)
-        
-    def _initialize_llm(self):
-        """LLM 초기화"""
-        try:
-            # 환경 변수에서 직접 API 키 가져오기
-            import os
-            from dotenv import load_dotenv
-            load_dotenv()
-            api_key = os.getenv("GOOGLE_API_KEY")
-            
-            return ChatGoogleGenerativeAI(
-                model="gemini-2.5-pro",
-                google_api_key=api_key,
-                temperature=0.3,
-                max_output_tokens=1024,
-                request_timeout=10.0  # 10초 타임아웃 설정
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize LLM: {str(e)}")
-            return None
     
     def process(self, state: GraphState) -> GraphState:
         """SQL 실행 결과를 자연어로 요약"""
@@ -1595,7 +1516,7 @@ class DataSummarizationNode(BaseNode):
             
             # Set default values since insight analyzer is disabled
             state["insight_report"] = None
-            state["business_insights"] = []
+            state["business_insights"] = None
             
             # 요약 생성
             if self.llm:
@@ -1604,7 +1525,11 @@ class DataSummarizationNode(BaseNode):
                 summary = self._generate_fallback_summary(query_result, result_stats)
             
             state["data_summary"] = summary
-            state["result_statistics"] = result_stats
+            # Ensure result_stats is a dict for result_statistics
+            if isinstance(result_stats, dict):
+                state["result_statistics"] = result_stats
+            else:
+                state["result_statistics"] = None
             
             # 신뢰도 계산
             confidence = self._calculate_summary_confidence(summary, result_stats)
@@ -1693,8 +1618,20 @@ class DataSummarizationNode(BaseNode):
                 HumanMessage(content=f"당신은 데이터 분석 전문가입니다. 쿼리 결과를 사용자 친화적으로 요약해주세요.\n\n{summary_prompt}")
             ]
             
+            if not self.llm:
+                self.logger.warning("LLM not initialized, returning default summary")
+                return "데이터 요약을 생성할 수 없습니다."
+            
             response = self.llm.invoke(messages)
-            return response.content.strip()
+            response_content = response.content
+            # Handle different response types
+            if isinstance(response_content, str):
+                return response_content.strip()
+            elif isinstance(response_content, list):
+                # Extract text from list of content blocks
+                return " ".join(str(item) for item in response_content).strip()
+            else:
+                return str(response_content).strip()
             
         except Exception as e:
             self.logger.error(f"AI summary generation failed: {e}")

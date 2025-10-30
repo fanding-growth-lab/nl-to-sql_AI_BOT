@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 logger = get_logger(__name__)
 
 
-def initialize_pipeline():
+def initialize_pipeline() -> Optional[AgentGraphRunner]:
     """Source: SlackBot._initialize_pipeline()"""
     try:
         # Get settings for pipeline configuration
@@ -121,7 +121,7 @@ def format_result_as_table(result_data: list) -> str:
     return "\n".join(table_parts)
 
 
-def format_agent_response(result_dict):
+def format_agent_response(result_dict: Dict[str, Any]) -> str:
     """Source: MessageHandler._format_agent_response()"""
     # 일반 대화 응답이 있는 경우 우선 처리
     if result_dict.get("conversation_response"):
@@ -133,8 +133,9 @@ def format_agent_response(result_dict):
     # Add SQL query if available
     if result_dict.get("sql_query") or result_dict.get("final_sql"):
         sql_query = result_dict.get("sql_query") or result_dict.get("final_sql")
-        formatted_parts.append("*📝 생성된 SQL 쿼리:*")
-        formatted_parts.append(f"```sql\n{sql_query.replace('                       ', '')}\n```")
+        if sql_query and isinstance(sql_query, str):
+            formatted_parts.append("*📝 생성된 SQL 쿼리:*")
+            formatted_parts.append(f"```sql\n{sql_query.replace('                       ', '')}\n```")
     
     # Add query result if available
     if result_dict.get("query_result") or result_dict.get("data_summary"):
@@ -233,22 +234,29 @@ def main():
             user_query = input("user: ")
             if user_query == 'exit': break 
 
+            if pipeline is None:
+                print("❌ 파이프라인이 초기화되지 않았습니다.")
+                continue
+
             session_id = str(uuid.uuid4())
             result = pipeline.process_query(
                 user_query=user_query,
                 session_id=session_id
             )
 
-            result_dict = None
+            result_dict: Dict[str, Any]
             if hasattr(result, 'to_dict'):
                 result_dict = result.to_dict()
             elif hasattr(result, '__dict__'):
                 result_dict = result.__dict__
-            else:
+            elif isinstance(result, dict):
                 result_dict = result
+            else:
+                # Convert to dict if possible
+                result_dict = {"result": result, "success": False}
             
             # If it's a conversational response, don't send processing message
-            if result_dict.get("conversation_response"):
+            if isinstance(result_dict, dict) and result_dict.get("conversation_response"):
                 formatted_response = format_agent_response(result_dict)
                 print(formatted_response, "\n\n")
                 continue
@@ -257,8 +265,12 @@ def main():
             print("🔍 **쿼리를 분석하고 있습니다...**\n\n⏳ 자연어 처리 → SQL 생성 → 데이터 조회 순서로 진행됩니다.")
             
             # Format and send response
-            formatted_response = format_agent_response(result_dict)
-            print(formatted_response, "\n\n")
+            if isinstance(result_dict, dict):
+                formatted_response = format_agent_response(result_dict)
+                print(formatted_response, "\n\n")
+            else:
+                print(f"❌ 예상치 못한 결과 형식: {type(result_dict)}")
+                print(f"결과: {result_dict}\n\n")
     except KeyboardInterrupt:
         print("\n🛑 사용자가 실행을 중단했습니다.")
     except Exception as e:

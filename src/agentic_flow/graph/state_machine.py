@@ -111,8 +111,13 @@ class AgentState(TypedDict):
     
     # Metadata
     processing_time: float
+    execution_time: float
     confidence_scores: Dict[str, float]
     debug_info: Dict[str, Any]
+    
+    # Additional fields for review
+    review_status: Optional[str]
+    review_result: Optional[Any]
     
     # Output
     final_sql: Optional[str]
@@ -123,7 +128,7 @@ class AgentState(TypedDict):
 def create_agent_graph(
     db_schema: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None
-) -> StateGraph:
+) -> Any:
     """
     Create the LangGraph state machine for NL-to-SQL processing.
     
@@ -330,20 +335,21 @@ def route_after_validation_check(state: AgentState) -> str:
         str: 다음 노드 이름 ("sql_execution", "user_review", "reject")
     """
     validation_result = state.get("validation_result")
-    processing_decision = state.get("processing_decision", {})
+    processing_decision = state.get("processing_decision") or {}
     
     if not validation_result:
         logger.warning("No validation result found, defaulting to user review")
         return "user_review"
     
     # 자동 승인 조건 확인 (높은 신뢰도)
-    if processing_decision.get("auto_approve", False):
+    if processing_decision and processing_decision.get("auto_approve", False):
         logger.info("Auto-approving query based on high confidence")
         return "sql_execution"
     
     # 높은 신뢰도면 자동 승인
-    if hasattr(validation_result, 'confidence') and validation_result.confidence >= 0.85:
-        logger.info(f"High confidence ({validation_result.confidence:.2f}), auto-approving")
+    if isinstance(validation_result, dict) and validation_result.get("confidence", 0) >= 0.85:
+        confidence = validation_result.get("confidence", 0)
+        logger.info(f"High confidence ({confidence:.2f}), auto-approving")
         return "sql_execution"
     
     # 재시도 횟수 체크 (무한 루프 방지)
@@ -355,12 +361,14 @@ def route_after_validation_check(state: AgentState) -> str:
         return "reject"
     
     # 검증 실패 시 사용자 검토로 이동 (강제 실행 제거)
-    if hasattr(validation_result, 'status') and validation_result.status.value == "rejected":
-        logger.warning("Query rejected due to validation issues, requiring user review")
-        return "user_review"
+    if isinstance(validation_result, dict):
+        status_value = validation_result.get("status")
+        if status_value and (hasattr(status_value, "value") and status_value.value == "rejected" or status_value == "rejected"):
+            logger.warning("Query rejected due to validation issues, requiring user review")
+            return "user_review"
     
     # 사용자 검토 필요 조건 확인
-    if processing_decision.get("needs_user_review", False):
+    if processing_decision and processing_decision.get("needs_user_review", False):
         logger.info("Query requires user review")
         return "user_review"
     
@@ -450,13 +458,19 @@ def _execute_sql_query(state: AgentState) -> AgentState:
         result = execute_query(sql_query, readonly=True)
         execution_time = time.time() - start_time
         
-        # NoneType 에러 방지: result가 None인 경우 빈 리스트로 처리
-        if result is None:
-            result = []
-            logger.warning("SQL query returned None, treating as empty result")
+        # Handle different return types: int (affected rows) or List[Dict[str, Any]] (query results)
+        if isinstance(result, int):
+            # For non-SELECT queries, convert to empty list
+            query_result: List[Dict[str, Any]] = []
+            logger.info(f"Query executed successfully (affected rows: {result})")
+        else:
+            # For SELECT queries, ensure result is a list
+            query_result = result if isinstance(result, list) else []
+            if result is None:
+                logger.warning("SQL query returned None, treating as empty result")
         
         # Update state
-        state["query_result"] = result
+        state["query_result"] = query_result
         state["execution_time"] = execution_time
         state["success"] = True
         state["execution_status"] = ExecutionStatus.COMPLETED.value
@@ -467,11 +481,11 @@ def _execute_sql_query(state: AgentState) -> AgentState:
             success=True,
             execution_time=execution_time,
             confidence=1.0,
-            metadata={"rows_returned": len(result)}
+            metadata={"rows_returned": len(query_result)}
         )
         state["node_results"].append(node_result)
         
-        logger.info(f"Query executed successfully in {execution_time:.2f}s, returned {len(result)} rows")
+        logger.info(f"Query executed successfully in {execution_time:.2f}s, returned {len(query_result)} rows")
         
     except Exception as e:
         execution_time = time.time() - start_time
@@ -560,8 +574,13 @@ def initialize_state(
         
         # Metadata
         processing_time=0.0,
+        execution_time=0.0,
         confidence_scores={},
         debug_info={},
+        
+        # Additional fields for review
+        review_status=None,
+        review_result=None,
         
         # Output
         final_sql=None,

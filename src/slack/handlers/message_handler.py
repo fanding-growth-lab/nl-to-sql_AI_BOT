@@ -5,7 +5,7 @@ This module handles message events including direct messages and app mentions.
 """
 
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from core.logging import get_logger
@@ -13,18 +13,7 @@ from .base_handler import BaseSlackHandler
 
 logger = get_logger(__name__)
 
-try:
-    from src.monitoring.error_monitor import record_slack_error, record_sql_generation_error, record_nl_processing_error
-except ImportError:
-    # 모니터링 모듈이 없는 경우 경고 로그 출력
-    logger.debug("Monitoring module not found, skipping error recording.")
-    
-    def record_slack_error(message, severity, user_id=None, channel_id=None):
-        pass
-    def record_sql_generation_error(message, severity, user_id=None, channel_id=None):
-        pass
-    def record_nl_processing_error(message, severity, user_id=None, channel_id=None):
-        pass
+from monitoring.error_monitor import record_slack_error, record_sql_generation_error, record_nl_processing_error
 
 
 class MessageHandler(BaseSlackHandler):
@@ -40,7 +29,7 @@ class MessageHandler(BaseSlackHandler):
         
         logger.info("Message handlers registered successfully")
     
-    def handle_message(self, message: Dict[str, Any], say: callable):
+    def handle_message(self, message: Dict[str, Any], say: Callable[..., None]):
         """
         Handle direct message events.
         
@@ -69,7 +58,7 @@ class MessageHandler(BaseSlackHandler):
             logger.error(f"Message handler error: {str(e)}", exc_info=True)
             say("❌ 메시지 처리 중 오류가 발생했습니다.")
     
-    def handle_app_mention(self, event: Dict[str, Any], say: callable):
+    def handle_app_mention(self, event: Dict[str, Any], say: Callable[..., None]):
         """
         Handle app mention events in channels.
         
@@ -89,7 +78,7 @@ class MessageHandler(BaseSlackHandler):
             logger.error(f"App mention handler error: {str(e)}", exc_info=True)
             say("❌ 멘션 처리 중 오류가 발생했습니다.")
     
-    def _process_and_respond(self, query: str, event_data: Dict[str, Any], say: callable, thread_ts: Optional[str], is_mention: bool):
+    def _process_and_respond(self, query: str, event_data: Dict[str, Any], say: Callable[..., None], thread_ts: Optional[str], is_mention: bool):
         """
         Common processing and response logic for both message and mention handlers.
         
@@ -119,8 +108,12 @@ class MessageHandler(BaseSlackHandler):
             # Process the query
             if self.agent_runner:
                 try:
-                    # Run the agent pipeline
-                    result = self._run_agent_pipeline(query)
+                     # For data queries, send processing message
+                    say("🔍 **쿼리를 분석하고 있습니다...**\n\n"
+                         "⏳ 자연어 처리 → SQL 생성 → 데이터 조회 순서로 진행됩니다.", 
+                         thread_ts=thread_ts)
+                    # Run the agent pipeline with event data for session and user tracking
+                    result = self._run_agent_pipeline(query, event_data)
                     
                     # result is already a dict from _run_agent_pipeline
                     result_dict = result if isinstance(result, dict) else result
@@ -131,10 +124,7 @@ class MessageHandler(BaseSlackHandler):
                         say(formatted_response, thread_ts=thread_ts)
                         return
                     
-                    # For data queries, send processing message
-                    say("🔍 **쿼리를 분석하고 있습니다...**\n\n"
-                         "⏳ 자연어 처리 → SQL 생성 → 데이터 조회 순서로 진행됩니다.", 
-                         thread_ts=thread_ts)
+                   
                     
                     # Format and send response
                     formatted_response = self._format_agent_response(result)
@@ -142,9 +132,7 @@ class MessageHandler(BaseSlackHandler):
                     
                 except Exception as e:
                     # Send processing message for errors too
-                    say("🔍 **쿼리를 분석하고 있습니다...**\n\n"
-                         "⏳ 자연어 처리 → SQL 생성 → 데이터 조회 순서로 진행됩니다.", 
-                         thread_ts=thread_ts)
+               
                     
                     error_msg = self._format_error_message(e)
                     say(error_msg, thread_ts=thread_ts)
@@ -154,6 +142,11 @@ class MessageHandler(BaseSlackHandler):
                     if suggestions:
                         say(suggestions, thread_ts=thread_ts)
                     
+                    # Record error with user and channel context for monitoring
+                    user_id = event_data.get("user")
+                    channel_id = event_data.get("channel")
+                    self._record_error_for_monitoring(e, query, user_id, channel_id)
+                    
                     logger.error(f"Agent pipeline error: {str(e)}", exc_info=True)
             else:
                 say("❌ 에이전트가 초기화되지 않았습니다.", thread_ts=thread_ts)
@@ -162,25 +155,81 @@ class MessageHandler(BaseSlackHandler):
             logger.error(f"Process and respond error: {str(e)}", exc_info=True)
             say("❌ 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
     
-    def _run_agent_pipeline(self, query: str) -> Dict[str, Any]:
+    def _run_agent_pipeline(self, query: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Run the agent pipeline to process the query.
         
         Args:
             query: Natural language query
+            event_data: Slack event data containing user_id, channel_id, thread_ts, etc.
             
         Returns:
             Agent pipeline result
         """
         try:
-            # Generate session ID for this query
             import uuid
-            session_id = str(uuid.uuid4())
+            
+            # Extract user_id and channel_id from event data
+            user_id = event_data.get("user")
+            channel_id = event_data.get("channel")
+            
+            # Generate session_id based on context to maintain conversation continuity
+            # Strategy:
+            # 1. Thread replies (thread_ts exists): Use thread_ts for both DM and Channel
+            # 2. DM without thread_ts: Use channel_id + user_id (DM is inherently 1:1 conversation)
+            # 3. Channel without thread_ts: Use message ts to create thread (bot will reply in thread)
+            #    This ensures the first mention creates a thread, and subsequent replies use the same session
+            
+            thread_ts = event_data.get("thread_ts")
+            channel_type = event_data.get("channel_type", "")
+            is_dm = channel_type == "im"
+            
+            if thread_ts and channel_id:
+                # Thread reply: Use thread_ts for conversation continuity
+                session_id = f"slack_{channel_id}_{thread_ts}"
+                logger.debug(f"Using thread-based session_id: {session_id} (thread_ts: {thread_ts})")
+            elif is_dm and user_id and channel_id:
+                # DM without thread: Use channel_id + user_id for conversation continuity
+                # DM conversations are inherently 1:1, so we can maintain session across messages
+                session_id = f"slack_dm_{channel_id}_{user_id}"
+                logger.debug(f"Using DM-based session_id: {session_id} (user: {user_id}, channel: {channel_id})")
+            elif channel_id:
+                # Channel without thread: Use message ts to create thread-based session
+                # When bot replies with thread_ts=ts, it creates a thread, and subsequent messages
+                # in that thread will have the same thread_ts, maintaining session continuity
+                message_ts = event_data.get("ts")
+                if message_ts:
+                    session_id = f"slack_{channel_id}_{message_ts}"
+                    logger.debug(f"Using message-ts-based session_id: {session_id} (will create thread, ts: {message_ts})")
+                else:
+                    session_id = str(uuid.uuid4())
+                    logger.debug(f"Using new UUID session_id: {session_id} (no ts available)")
+            else:
+                # Fallback: new UUID session
+                session_id = str(uuid.uuid4())
+                logger.debug(f"Using new UUID session_id: {session_id} (fallback)")
+            
+            # Check if agent runner is available
+            if self.agent_runner is None:
+                logger.error("Agent runner is not initialized")
+                return {
+                    "success": False,
+                    "error_message": "Agent pipeline is not available",
+                    "conversation_response": "죄송합니다. 현재 쿼리 처리 시스템을 사용할 수 없습니다.",
+                    "sql_query": None,
+                    "final_sql": None,
+                    "query_result": [],
+                    "data_summary": None,
+                    "confidence_scores": {}
+                }
             
             # Use sync method directly - Slack Bolt handles threading internally
+            # Pass user_id and channel_id for LangGraph state and monitoring
             result = self.agent_runner.process_query(
                 user_query=query,
-                session_id=session_id
+                session_id=session_id,
+                user_id=user_id,
+                channel_id=channel_id
             )
             
             # Ensure result is properly converted to dict
@@ -193,6 +242,12 @@ class MessageHandler(BaseSlackHandler):
                 
         except Exception as e:
             logger.error(f"Agent pipeline execution failed: {str(e)}", exc_info=True)
+            
+            # Record error with user and channel context for monitoring
+            user_id = event_data.get("user")
+            channel_id = event_data.get("channel")
+            self._record_error_for_monitoring(e, query, user_id, channel_id)
+            
             # Return error result in expected format
             return {
                 "success": False,
@@ -231,7 +286,14 @@ class MessageHandler(BaseSlackHandler):
         # 일반 대화 응답이 있는 경우 우선 처리
         if result_dict.get("conversation_response"):
             logger.info("💬 Using conversation response for display")
-            return result_dict["conversation_response"]
+            response = result_dict["conversation_response"]
+            
+            # 재입력 요청인 경우 추가 안내 메시지
+            if result_dict.get("needs_clarification"):
+                response = f"{response}\n\n💡 *다음 메시지에서 다시 질문해주시면 정상적으로 처리됩니다!*"
+                logger.info("🔄 Needs clarification flag set - user should resubmit query")
+            
+            return response
         
         formatted_parts = []
         
@@ -509,7 +571,7 @@ class MessageHandler(BaseSlackHandler):
                f"• `{mention_prefix}크리에이터 부서별 성과 분석해줘`\n"
                f"• `{mention_prefix}회원 리텐션 현황 보여줘`")
     
-    def _send_simple_review_request(self, say: callable, review_request, thread_ts: Optional[str] = None):
+    def _send_simple_review_request(self, say: Callable[..., None], review_request, thread_ts: Optional[str] = None):
         """
         간단한 채팅 방식으로 검토 요청 메시지 전송
         
@@ -561,7 +623,7 @@ class MessageHandler(BaseSlackHandler):
         review_responses = ["네", "예", "yes", "y", "아니오", "아니요", "no", "n", "수정:"]
         return any(response in query_lower for response in review_responses)
     
-    def _handle_review_response(self, query: str, event_data: Dict[str, Any], say: callable, thread_ts: Optional[str]):
+    def _handle_review_response(self, query: str, event_data: Dict[str, Any], say: Callable[..., None], thread_ts: Optional[str]):
         """검토 응답 처리"""
         try:
             query_lower = query.lower().strip()
@@ -569,18 +631,27 @@ class MessageHandler(BaseSlackHandler):
             
             # 승인 응답
             if any(response in query_lower for response in ["네", "예", "yes", "y"]):
-                self._handle_query_approval(user_id, say, thread_ts)
+                if user_id:
+                    self._handle_query_approval(user_id, say, thread_ts)
+                else:
+                    say("사용자 정보를 찾을 수 없습니다.", thread_ts=thread_ts)
                 return
             
             # 거부 응답
             if any(response in query_lower for response in ["아니오", "아니요", "no", "n"]):
-                self._handle_query_rejection(user_id, say, thread_ts)
+                if user_id:
+                    self._handle_query_rejection(user_id, say, thread_ts)
+                else:
+                    say("사용자 정보를 찾을 수 없습니다.", thread_ts=thread_ts)
                 return
             
             # 수정 응답
             if "수정:" in query_lower:
                 new_query = query.split(":", 1)[1].strip()
-                self._handle_query_modification(user_id, new_query, say, thread_ts)
+                if user_id:
+                    self._handle_query_modification(user_id, new_query, say, thread_ts)
+                else:
+                    say("사용자 정보를 찾을 수 없습니다.", thread_ts=thread_ts)
                 return
             
             # 인식되지 않은 응답
@@ -590,7 +661,7 @@ class MessageHandler(BaseSlackHandler):
             logger.error(f"Review response handling failed: {str(e)}")
             say("검토 응답 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
     
-    def _handle_query_approval(self, user_id: str, say: callable, thread_ts: Optional[str]):
+    def _handle_query_approval(self, user_id: str, say: Callable[..., None], thread_ts: Optional[str]):
         """쿼리 승인 처리"""
         try:
             # TODO: 실제 승인 로직 구현
@@ -602,7 +673,7 @@ class MessageHandler(BaseSlackHandler):
             logger.error(f"Query approval handling failed: {str(e)}")
             say("승인 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
     
-    def _handle_query_rejection(self, user_id: str, say: callable, thread_ts: Optional[str]):
+    def _handle_query_rejection(self, user_id: str, say: Callable[..., None], thread_ts: Optional[str]):
         """쿼리 거부 처리"""
         try:
             # TODO: 실제 거부 로직 구현
@@ -613,7 +684,7 @@ class MessageHandler(BaseSlackHandler):
             logger.error(f"Query rejection handling failed: {str(e)}")
             say("거부 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
     
-    def _handle_query_modification(self, user_id: str, new_query: str, say: callable, thread_ts: Optional[str]):
+    def _handle_query_modification(self, user_id: str, new_query: str, say: Callable[..., None], thread_ts: Optional[str]):
         """쿼리 수정 처리"""
         try:
             if not new_query:

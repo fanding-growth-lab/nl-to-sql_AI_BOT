@@ -65,12 +65,12 @@ def validate_state_transition(
         return False, f"Validation error: {str(e)}"
 
 
-def serialize_state(state: AgentState, format_type: str = "json") -> str:
+def serialize_state(state: Union[AgentState, Dict[str, Any]], format_type: str = "json") -> str:
     """
     Serialize pipeline state to string.
     
     Args:
-        state: Pipeline state to serialize
+        state: Pipeline state to serialize (AgentState or dict)
         format_type: Serialization format ("json" or "pickle")
         
     Returns:
@@ -132,7 +132,7 @@ def _make_serializable(obj: Any) -> Any:
     elif isinstance(obj, (list, tuple)):
         return [_make_serializable(item) for item in obj]
     
-    elif is_dataclass(obj):
+    elif is_dataclass(obj) and not isinstance(obj, type):
         return _make_serializable(asdict(obj))
     
     elif isinstance(obj, datetime):
@@ -370,8 +370,9 @@ def create_state_checkpoint(state: AgentState, checkpoint_name: Optional[str] = 
             "integrity_errors": errors if not is_valid else []
         }
         
-        # Serialize checkpoint
-        serialized_checkpoint = serialize_state(checkpoint_data, format_type="json")
+        # Serialize checkpoint (checkpoint_data is a dict, not AgentState)
+        serializable_checkpoint = _make_serializable(checkpoint_data)
+        serialized_checkpoint = json.dumps(serializable_checkpoint, ensure_ascii=False, indent=2)
         
         logger.info(f"Created checkpoint: {checkpoint_name}")
         return serialized_checkpoint
@@ -392,16 +393,19 @@ def restore_state_from_checkpoint(checkpoint_data: str) -> Tuple[AgentState, Dic
         Tuple of (restored_state, checkpoint_info)
     """
     try:
-        # Deserialize checkpoint data
-        checkpoint = deserialize_state(checkpoint_data, format_type="json")
+        # Deserialize checkpoint data directly (checkpoint is a dict, not AgentState)
+        checkpoint: Dict[str, Any] = json.loads(checkpoint_data)
         
         # Extract state and info
-        restored_state = checkpoint["state"]
+        restored_state_dict = checkpoint.get("state", {})
+        # Convert to AgentState
+        restored_state: AgentState = restored_state_dict  # type: ignore[assignment]
+        
         checkpoint_info = {
-            "checkpoint_name": checkpoint["checkpoint_name"],
-            "timestamp": checkpoint["timestamp"],
-            "state_summary": checkpoint["state_summary"],
-            "integrity_errors": checkpoint["integrity_errors"]
+            "checkpoint_name": checkpoint.get("checkpoint_name", "unknown"),
+            "timestamp": checkpoint.get("timestamp", ""),
+            "state_summary": checkpoint.get("state_summary", {}),
+            "integrity_errors": checkpoint.get("integrity_errors", [])
         }
         
         # Validate restored state

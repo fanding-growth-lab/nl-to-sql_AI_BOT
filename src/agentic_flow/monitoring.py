@@ -270,7 +270,7 @@ class PipelineMonitor:
         # Implementation for tracking execution end
         pass
     
-    def finish(self, state: Dict[str, Any]) -> PipelineMetrics:
+    def finish(self, state: Dict[str, Any]) -> Optional[PipelineMetrics]:
         """Finish monitoring and return final metrics."""
         if self.metrics:
             return metrics_collector.finish_metrics(self.metrics, state)

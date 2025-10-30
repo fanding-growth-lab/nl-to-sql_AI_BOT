@@ -76,22 +76,37 @@ class GraphState(TypedDict):
     # Processing stages
     normalized_query: Optional[str]
     intent: Optional[QueryIntent]
+    llm_intent_result: Optional[Dict[str, Any]]  # LLM intent classification result
     entities: List[Entity]
     schema_mapping: Optional[SchemaMapping]
     sql_result: Optional[SQLResult]
     
     # SQL Generation
     sql_query: Optional[str]
+    validated_sql: Optional[str]
+    sql_corrected: Optional[str]
+    sql_validation: Optional[Dict[str, Any]]
     rag_mapping_result: Optional[Any]
     dynamic_pattern: Optional[Any]
     fanding_template: Optional[Any]
+    agent_schema_mapping: Optional[Dict[str, Any]]
+    
+    # Query execution results
+    query_result: List[Dict[str, Any]]
     
     # Conversation handling
     skip_sql_generation: Optional[bool]
     conversation_response: Optional[str]
+    conversation_text: Optional[str]
+    needs_clarification: Optional[bool]  # 사용자 재입력이 필요한지 표시
+    clarification_question: Optional[str]
+    slots: Optional[Dict[str, Any]]
     
     # Validation and error handling
     is_valid: bool
+    validation_result: Optional[Dict[str, Any]]
+    processing_decision: Optional[Dict[str, Any]]
+    sql_validation_failed: Optional[bool]
     error_message: Optional[str]
     retry_count: int
     max_retries: int
@@ -100,9 +115,14 @@ class GraphState(TypedDict):
     processing_time: float
     confidence_scores: Dict[str, float]
     debug_info: Dict[str, Any]
+    sql_generation_metadata: Optional[Dict[str, Any]]
     
     # Output
     final_sql: Optional[str]
+    data_summary: Optional[str]
+    insight_report: Optional[Dict[str, Any]]
+    business_insights: Optional[Dict[str, Any]]
+    result_statistics: Optional[Dict[str, Any]]
     explanation: Optional[str]
     success: bool
 
@@ -133,33 +153,51 @@ def create_initial_state(
     max_retries: int = 3
 ) -> GraphState:
     """Create initial state for the pipeline."""
-    return GraphState(
-        user_query=user_query,
-        user_id=user_id,
-        channel_id=channel_id,
-        context=context or {},
-        normalized_query=None,
-        intent=None,
-        entities=[],
-        schema_mapping=None,
-        sql_result=None,
-        sql_query=None,
-        rag_mapping_result=None,
-        dynamic_pattern=None,
-        fanding_template=None,
-        skip_sql_generation=None,
-        conversation_response=None,
-        is_valid=False,
-        error_message=None,
-        retry_count=0,
-        max_retries=max_retries,
-        processing_time=0.0,
-        confidence_scores={},
-        debug_info={},
-        final_sql=None,
-        explanation=None,
-        success=False
-    )
+    return {
+        "user_query": user_query,
+        "user_id": user_id,
+        "channel_id": channel_id,
+        "context": context or {},
+        "normalized_query": None,
+        "intent": None,
+        "llm_intent_result": None,
+        "entities": [],
+        "schema_mapping": None,
+        "sql_result": None,
+        "sql_query": None,
+        "validated_sql": None,
+        "sql_corrected": None,
+        "sql_validation": None,
+        "rag_mapping_result": None,
+        "dynamic_pattern": None,
+        "fanding_template": None,
+        "agent_schema_mapping": None,
+        "query_result": [],
+        "skip_sql_generation": None,
+        "conversation_response": None,
+        "conversation_text": None,
+        "needs_clarification": None,
+        "clarification_question": None,
+        "slots": None,
+        "is_valid": False,
+        "validation_result": None,
+        "processing_decision": None,
+        "sql_validation_failed": None,
+        "error_message": None,
+        "retry_count": 0,
+        "max_retries": max_retries,
+        "processing_time": 0.0,
+        "confidence_scores": {},
+        "debug_info": {},
+        "sql_generation_metadata": None,
+        "final_sql": None,
+        "data_summary": None,
+        "insight_report": None,
+        "business_insights": None,
+        "result_statistics": None,
+        "explanation": None,
+        "success": False
+    }
 
 
 def update_state_confidence(state: GraphState, component: str, confidence: float) -> GraphState:

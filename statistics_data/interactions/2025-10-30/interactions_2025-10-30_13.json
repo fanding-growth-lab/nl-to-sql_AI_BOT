@@ -1,0 +1,24 @@
+[
+  {
+    "user_query": "9월 활성화 회원 알려줘.",
+    "user_id": null,
+    "session_id": null,
+    "intent": "DATA_QUERY",
+    "intent_confidence": 1.0,
+    "intent_reasoning": null,
+    "sql_query": null,
+    "validation_passed": false,
+    "execution_success": false,
+    "execution_result_count": 0,
+    "response_time_ms": 2424.57914352417,
+    "total_processing_time_ms": 0.0,
+    "mapping_result": null,
+    "schema_mapping": null,
+    "template_used": null,
+    "user_feedback": null,
+    "user_satisfaction": null,
+    "timestamp": 1761796863.5029056,
+    "is_error": false,
+    "error_message": null
+  }
+]

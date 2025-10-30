@@ -59,6 +59,7 @@ class GraphExecutionResult:
     node_results: List[Dict[str, Any]]
     debug_info: Dict[str, Any]
     conversation_response: Optional[str] = None
+    needs_clarification: Optional[bool] = None  # 사용자 재입력 필요 여부
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -159,7 +160,7 @@ class AgentGraphRunner:
         start_time = time.time()
         
         try:
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.start_execution(session_id)
             
             # Create run configuration
@@ -198,7 +199,7 @@ class AgentGraphRunner:
             
             # Session state is managed by LangGraph's checkpointer
             
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.end_execution(session_id, success=result.success)
             
             logger.info(f"Query processed successfully in {execution_time:.2f}s")
@@ -210,7 +211,7 @@ class AgentGraphRunner:
             
             logger.error(error_msg)
             
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.end_execution(session_id, success=False)
             
             # Create error result
@@ -278,7 +279,7 @@ class AgentGraphRunner:
         start_time = time.time()
         
         try:
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.start_execution(session_id)
             
             # Create run configuration
@@ -306,7 +307,7 @@ class AgentGraphRunner:
             
             # Session state is managed by LangGraph's checkpointer
             
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.end_execution(session_id, success=result.success)
             
             logger.info(f"Query processed asynchronously in {execution_time:.2f}s")
@@ -318,7 +319,7 @@ class AgentGraphRunner:
             
             logger.error(error_msg)
             
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.end_execution(session_id, success=False)
             
             # Create error result
@@ -385,7 +386,7 @@ class AgentGraphRunner:
         start_time = time.time()
         
         try:
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.start_execution(session_id)
             
             # Create run configuration
@@ -438,7 +439,7 @@ class AgentGraphRunner:
             
             yield final_progress
             
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.end_execution(session_id, success=True)
             
             logger.info(f"Query execution streamed successfully in {final_elapsed:.2f}s")
@@ -462,7 +463,7 @@ class AgentGraphRunner:
             
             yield error_progress
             
-            if self.enable_monitoring:
+            if self.monitor:
                 self.monitor.end_execution(session_id, success=False)
     
     def _create_execution_result(
@@ -490,18 +491,21 @@ class AgentGraphRunner:
             )
         
         # Safe access to final_state using consistent dictionary access
+        # TypedDict는 dict의 서브타입이므로 dict로 캐스팅하여 .get() 사용
         try:
-            success = final_state.get("success", False)
-            final_sql = final_state.get("final_sql") or final_state.get("sql_query")
-            query_result = final_state.get("query_result", [])
-            data_summary = final_state.get("data_summary")
-            error_message = final_state.get("error_message")
-            confidence_scores = final_state.get("confidence_scores", {})
-            debug_info = final_state.get("debug_info", {})
-            conversation_response = final_state.get("conversation_response")
+            state_dict: Dict[str, Any] = final_state  # type: ignore[assignment]
+            success = state_dict.get("success", False)
+            final_sql = state_dict.get("final_sql") or state_dict.get("sql_query")
+            query_result = state_dict.get("query_result", [])
+            data_summary = state_dict.get("data_summary")
+            error_message = state_dict.get("error_message")
+            confidence_scores = state_dict.get("confidence_scores", {})
+            debug_info = state_dict.get("debug_info", {})
+            conversation_response = state_dict.get("conversation_response")
+            needs_clarification = state_dict.get("needs_clarification", False)
             
             # Process node_results safely
-            node_results_raw = final_state.get("node_results", [])
+            node_results_raw = state_dict.get("node_results", [])
             node_results_dict = []
             for res in node_results_raw:
                 if hasattr(res, '__dict__'):  # dataclass or object
@@ -523,6 +527,7 @@ class AgentGraphRunner:
             confidence_scores = {}
             debug_info = {"error": str(e)}
             conversation_response = None
+            needs_clarification = False
             node_results_dict = []
         
         return GraphExecutionResult(
@@ -537,21 +542,20 @@ class AgentGraphRunner:
             confidence_scores=confidence_scores,
             node_results=node_results_dict,
             debug_info=debug_info,
-            conversation_response=conversation_response
+            conversation_response=conversation_response,
+            needs_clarification=needs_clarification
         )
     
     
     def get_monitoring_metrics(self) -> Optional[Dict[str, Any]]:
         """Get performance monitoring metrics."""
-        if self.monitor:
-            return self.monitor.get_metrics_summary()
-        return None
+        from ..monitoring import metrics_collector
+        return metrics_collector.get_performance_summary()
     
     def get_health_status(self) -> Optional[Dict[str, Any]]:
         """Get system health status."""
-        if self.monitor:
-            return self.monitor.get_health_status()
-        return None
+        from ..monitoring import metrics_collector
+        return metrics_collector.get_health_status()
     
     def _record_integrated_metrics(
         self,
@@ -567,18 +571,32 @@ class AgentGraphRunner:
         Intent 분류와 AutoLearning 데이터를 통합하여 기록합니다.
         """
         try:
-            from ..intent_classification_stats import get_integrator, QueryInteractionMetrics
+            from agentic_flow.intent_classification_stats import get_integrator, QueryInteractionMetrics
             
             integrator = get_integrator()
             
+            # State를 dict로 캐스팅하여 안전하게 접근
+            state_dict: Dict[str, Any] = final_state  # type: ignore[assignment]
+            
             # State에서 데이터 추출
-            intent_result = final_state.get("llm_intent_result", {})
+            intent_result = state_dict.get("llm_intent_result", {})
             intent = intent_result.get("intent", "UNKNOWN") if isinstance(intent_result, dict) else "UNKNOWN"
             intent_confidence = intent_result.get("confidence", 0.0) if isinstance(intent_result, dict) else 0.0
             intent_reasoning = intent_result.get("reasoning", None) if isinstance(intent_result, dict) else None
             
-            validation_result = final_state.get("validation_result", {})
+            validation_result = state_dict.get("validation_result", {})
             validation_passed = validation_result.get("is_valid", False) if isinstance(validation_result, dict) else False
+            
+            # fanding_template 안전하게 처리
+            fanding_template = state_dict.get("fanding_template")
+            template_used = None
+            if fanding_template is not None:
+                if hasattr(fanding_template, 'name'):
+                    template_used = fanding_template.name
+                elif isinstance(fanding_template, dict):
+                    template_used = fanding_template.get("name")
+                elif isinstance(fanding_template, str):
+                    template_used = fanding_template
             
             # 통합 메트릭스 생성
             metrics = QueryInteractionMetrics(
@@ -594,9 +612,9 @@ class AgentGraphRunner:
                 execution_result_count=len(result.query_result) if result.query_result else 0,
                 response_time_ms=execution_time_ms,
                 total_processing_time_ms=execution_time_ms,
-                mapping_result=final_state.get("agent_schema_mapping"),
-                schema_mapping=final_state.get("schema_mapping"),
-                template_used=final_state.get("fanding_template").name if final_state.get("fanding_template") else None,
+                mapping_result=state_dict.get("agent_schema_mapping"),
+                schema_mapping=state_dict.get("schema_mapping"),
+                template_used=template_used,
                 timestamp=time.time(),
                 is_error=not result.success,
                 error_message=result.error_message
@@ -622,10 +640,10 @@ class AgentGraphRunner:
         """
         try:
             checkpointer = self.context_manager.get_checkpointer()
-            config = {"configurable": {"thread_id": session_id}}
+            config: Any = {"configurable": {"thread_id": session_id}}  # type: ignore[assignment]
             
             # Get the latest checkpoint for this thread
-            checkpoint = checkpointer.get(config)
+            checkpoint = checkpointer.get(config)  # type: ignore[arg-type]
             
             if checkpoint is None:
                 return None
@@ -661,10 +679,10 @@ class AgentGraphRunner:
         """
         try:
             checkpointer = self.context_manager.get_checkpointer()
-            config = {"configurable": {"thread_id": session_id}}
+            config: Any = {"configurable": {"thread_id": session_id}}  # type: ignore[assignment]
             
             # Get the latest checkpoint for this thread
-            checkpoint = checkpointer.get(config)
+            checkpoint = checkpointer.get(config)  # type: ignore[arg-type]
             
             if checkpoint is None:
                 return []
@@ -725,16 +743,18 @@ class AgentGraphRunner:
         """
         try:
             checkpointer = self.context_manager.get_checkpointer()
-            config = {"configurable": {}}
+            config: Any = {"configurable": {}}  # type: ignore[assignment]
             
             # Get all thread IDs
-            threads_generator = checkpointer.list(config)
+            threads_generator = checkpointer.list(config)  # type: ignore[arg-type]
             thread_ids = []
             for thread_config in threads_generator:
                 if isinstance(thread_config, dict) and "configurable" in thread_config:
-                    thread_id = thread_config["configurable"].get("thread_id")
-                    if thread_id:
-                        thread_ids.append(thread_id)
+                    configurable = thread_config.get("configurable", {})
+                    if isinstance(configurable, dict):
+                        thread_id = configurable.get("thread_id")
+                        if thread_id:
+                            thread_ids.append(thread_id)
             
             # Get session info for each thread
             active_sessions = []

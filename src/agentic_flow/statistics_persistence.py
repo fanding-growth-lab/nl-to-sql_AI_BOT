@@ -125,6 +125,15 @@ class StatisticsPersistenceManager:
             self.logger.error(f"Failed to initialize database: {e}")
             self.config.enable_database = False
     
+    @contextmanager
+    def _get_db_connection(self):
+        """데이터베이스 연결 컨텍스트 매니저"""
+        conn = sqlite3.connect(self.config.database_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    
     def save_statistics(self, stats: Any, 
                         metrics_batch: Optional[List[Any]] = None) -> bool:
         """통계 데이터 저장"""
