@@ -203,11 +203,12 @@ def create_agent_graph(
     )
 
     # Define the flow
-    graph.add_edge(START, "llm_intent_classification")
-    graph.add_edge("llm_intent_classification", "nlp_processing")
-    graph.add_edge("nlp_processing", "schema_mapping")
-    graph.add_edge("schema_mapping", "dynamic_sql_generation")
-    graph.add_edge("dynamic_sql_generation", "sql_generation")
+    graph.add_edge(START, "schema_mapping")
+    # graph.add_edge("llm_intent_classification", "nlp_processing")
+    # graph.add_edge("nlp_processing", "schema_mapping")
+    # graph.add_edge("schema_mapping", "dynamic_sql_generation")
+    # graph.add_edge("dynamic_sql_generation", "sql_generation")
+    graph.add_edge("schema_mapping", "sql_generation")
     graph.add_edge("sql_generation", "sql_validation")
 
     # Conditional edge for SQL validation
@@ -554,14 +555,7 @@ def _execute_sql_query(state: AgentState) -> AgentState:
     return state
 
 
-def initialize_state(
-    user_query: str,
-    user_id: Optional[str] = None,
-    channel_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    context: Optional[Dict[str, Any]] = None,
-    max_retries: int = 3,
-) -> AgentState:
+def initialize_state(**kwargs) -> AgentState:
     """
     Initialize the pipeline state.
 
@@ -572,39 +566,40 @@ def initialize_state(
         session_id: Session identifier
         context: Additional context
         max_retries: Maximum number of retries
+        ...
 
     Returns:
         Initialized AgentState
     """
     return AgentState(
         # Input
-        user_query=user_query,
-        user_id=user_id,
-        channel_id=channel_id,
-        session_id=session_id,
-        context=context or {},
+        user_query=kwargs.get("user_query", ""),
+        user_id=kwargs.get("user_id"),
+        channel_id=kwargs.get("channel_id"),
+        session_id=kwargs.get("session_id"),
+        context=kwargs.get("context") or {},
         # Processing stages
-        normalized_query=None,
-        intent=None,
-        llm_intent_result=None,
-        entities=[],
-        agent_schema_mapping=None,
-        sql_query=None,
-        validated_sql=None,
-        query_result=[],
-        data_summary=None,
+        normalized_query=kwargs.get("normalized_query"),
+        intent=kwargs.get("intent"),
+        llm_intent_result=kwargs.get("llm_intent_result"),
+        entities=kwargs.get("entities", []),
+        agent_schema_mapping=kwargs.get("agent_schema_mapping"),
+        sql_query=kwargs.get("sql_query"),
+        validated_sql=kwargs.get("validated_sql"),
+        query_result=kwargs.get("query_result", []),
+        data_summary=kwargs.get("data_summary"),
         # Conversation handling
-        skip_sql_generation=False,
-        conversation_response=None,
+        skip_sql_generation=kwargs.get("skip_sql_generation", False),
+        conversation_response=kwargs.get("conversation_response"),
         # Fanding templates
-        fanding_template=None,
+        fanding_template=kwargs.get("fanding_template"),
         # Validation and error handling
-        validation_result=None,
-        processing_decision=None,
-        is_valid=True,
-        error_message=None,
+        validation_result=kwargs.get("validation_result"),
+        processing_decision=kwargs.get("processing_decision"),
+        is_valid=kwargs.get("is_valid", False),
+        error_message=kwargs.get("error_message"),
         retry_count=0,
-        max_retries=max_retries,
+        max_retries=kwargs.get("max_retries", 3),
         # Execution tracking
         current_node=None,
         execution_status=ExecutionStatus.PENDING.value,

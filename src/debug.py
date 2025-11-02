@@ -239,9 +239,15 @@ def main():
                 continue
 
             session_id = str(uuid.uuid4())
+            
+            # state_machine에서 구현한 워크플로우에서 사용할 인자 넣어주기
             result = pipeline.process_query(
                 user_query=user_query,
-                session_id=session_id
+                session_id=session_id,
+                skip_sql_generation=False,
+                conversation_response=None,
+                intent="DATA_QUERY",
+                # ...
             )
 
             result_dict: Dict[str, Any]
