@@ -1,0 +1,3 @@
+{"timestamp": 1761811460.1138163, "metrics": {"intent": "DATA_QUERY", "confidence": 0.95, "response_time_ms": 1862.1106147766113, "timestamp": 1761811460.1138163, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1761811960.8556654, "metrics": {"intent": "DATA_QUERY", "confidence": 1.0, "response_time_ms": 1577.0692825317383, "timestamp": 1761811960.8556654, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1761811991.699842, "metrics": {"intent": "DATA_QUERY", "confidence": 1.0, "response_time_ms": 32428.715467453003, "timestamp": 1761811991.699842, "is_error": false}, "type": "raw_metrics"}

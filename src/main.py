@@ -53,6 +53,7 @@ except ImportError as e:
 # Global variables for app state
 slack_app: Optional[SlackApp] = None
 slack_handler: Optional[SlackRequestHandler] = None
+slack_bot: Optional[Any] = None  # Store SlackBot instance to access config
 learning_system: Optional[AutoLearningSystem] = None
 db_manager: Optional[DatabaseManager] = None
 
@@ -127,7 +128,7 @@ app = create_fastapi_app()
 
 async def startup_event():
     """Application startup event handler."""
-    global slack_app, slack_handler, db_manager, learning_system
+    global slack_app, slack_handler, slack_bot, db_manager, learning_system
     
     try:
         logger.info("Starting PF_bearbot API...")
@@ -143,8 +144,9 @@ async def startup_event():
         
         # Initialize Slack bot (optional - don't fail startup if Slack is not configured)
         try:
-            slack_bot = create_slack_bot()
-            slack_app = slack_bot.app
+            from slack.bot import create_slack_bot
+            bot_instance = create_slack_bot()
+            slack_app = bot_instance.app
             if slack_app is None:
                 raise ValueError("Slack app is None")
             slack_handler = SlackRequestHandler(slack_app)
@@ -152,13 +154,44 @@ async def startup_event():
             logger.info("Slack bot initialized successfully")
             
             # Log application status
-            bot_status = get_bot_status(slack_bot)
+            bot_status = get_bot_status(bot_instance)
             logger.info(f"Bot status: {bot_status}")
+            
+            # Start Slack bot in Socket Mode if configured
+            # Note: Socket Mode runs in a separate thread using connect() instead of start()
+            # to avoid signal handler issues (signal handlers only work in main thread)
+            if bot_instance.config.socket_mode:
+                import threading
+                def start_slack_bot():
+                    try:
+                        logger.info("Starting Slack Socket Mode handler in background thread...")
+                        # Use connect() which doesn't require signal handlers
+                        bot_instance.start()
+                    except Exception as e:
+                        logger.error(f"Failed to start Slack bot in Socket Mode: {e}", exc_info=True)
+                        # Log connection status for debugging
+                        logger.error(f"Socket Mode thread exiting due to error. Check logs above for details.")
+                
+                # Start Socket Mode handler in a separate thread (it's blocking)
+                slack_thread = threading.Thread(target=start_slack_bot, daemon=True, name="SlackSocketMode")
+                slack_thread.start()
+                logger.info("Slack Socket Mode handler thread started (background)")
+                
+                # Note: handler.connect() may return after establishing connection,
+                # but the WebSocket connection is maintained by internal worker threads.
+                # The thread may exit after connection setup, which is normal behavior.
+                # The actual message processing happens in Slack Bolt's internal threads.
+            else:
+                logger.info("Slack bot configured for HTTP Mode (using /slack/events endpoint)")
+            
+            # Store bot instance for shutdown
+            slack_bot = bot_instance
             
         except Exception as slack_error:
             logger.warning(f"Slack bot initialization failed (continuing without Slack): {slack_error}")
             slack_app = None
             slack_handler = None
+            slack_bot = None
         
         logger.info("PF_bearbot API started successfully")
         
@@ -703,6 +736,122 @@ async def reset_classification_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/stats/sql/accuracy")
+async def get_sql_accuracy_statistics():
+    """
+    Get SQL accuracy evaluation statistics.
+    
+    Returns:
+        SQL accuracy statistics including average accuracy, distribution, and success rate
+    """
+    try:
+        from agentic_flow.sql_accuracy_evaluator import get_accuracy_evaluator
+        
+        evaluator = get_accuracy_evaluator()
+        stats = evaluator.get_accuracy_statistics()
+        
+        return {
+            "success": True,
+            "statistics": stats,
+            "timestamp": time.time()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get SQL accuracy statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/feedback/collect")
+async def collect_user_feedback(
+    session_id: str,
+    user_query: str,
+    generated_sql: str,
+    feedback_type: str,  # "positive", "negative", "correction", "clarification"
+    corrected_sql: Optional[str] = None,
+    feedback_text: Optional[str] = None
+):
+    """
+    Collect user feedback for SQL generation.
+    
+    Args:
+        session_id: Session identifier
+        user_query: Original user query
+        generated_sql: Generated SQL query
+        feedback_type: Type of feedback
+        corrected_sql: Corrected SQL (for correction type)
+        feedback_text: Feedback text
+        
+    Returns:
+        Success status and feedback ID
+    """
+    try:
+        from agentic_flow.feedback_collector import get_feedback_collector, FeedbackType
+        from agentic_flow.learning_data_integrator import get_learning_integrator
+        
+        feedback_collector = get_feedback_collector()
+        learning_integrator = get_learning_integrator()
+        
+        # 피드백 타입 변환
+        try:
+            fb_type = FeedbackType(feedback_type.lower())
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid feedback type: {feedback_type}")
+        
+        # 피드백 수집
+        feedback = feedback_collector.collect_feedback(
+            session_id=session_id,
+            user_query=user_query,
+            generated_sql=generated_sql,
+            feedback_type=fb_type,
+            corrected_sql=corrected_sql,
+            feedback_text=feedback_text
+        )
+        
+        # 학습 데이터로 통합
+        learning_integrator.integrate_feedback(
+            session_id=session_id,
+            user_query=user_query,
+            generated_sql=generated_sql,
+            feedback_type=fb_type,
+            corrected_sql=corrected_sql,
+            feedback_text=feedback_text
+        )
+        
+        return {
+            "success": True,
+            "feedback_id": feedback.feedback_id,
+            "message": "Feedback collected and integrated into learning data"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to collect feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/learning/analysis")
+async def get_learning_analysis():
+    """
+    Get learning data analysis and improvement suggestions.
+    
+    Returns:
+        Analysis results including feedback patterns, accuracy statistics, and improvement suggestions
+    """
+    try:
+        from agentic_flow.learning_data_integrator import get_learning_integrator
+        
+        integrator = get_learning_integrator()
+        analysis = integrator.analyze_and_improve()
+        
+        return {
+            "success": True,
+            "analysis": analysis,
+            "timestamp": time.time()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get learning analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/stats/system/health")
 async def get_system_health():
     """
@@ -825,6 +974,7 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind the server to")
     parser.add_argument("--port", default=8000, type=int, help="Port to bind the server to")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+    parser.add_argument("--no-reload", action="store_true", help="Disable auto-reload (overrides --reload and debug mode)")
     parser.add_argument("--log-level", default="info", help="Log level (debug, info, warning, error)")
     
     args = parser.parse_args()
@@ -838,9 +988,15 @@ def main():
     # Import uvicorn here to avoid import issues
     import uvicorn
     
-    # Determine if reload should be enabled@
+    # Determine if reload should be enabled
     settings = get_settings()
-    reload_enabled = args.reload or settings.debug
+    # 기본값: reload 활성화 (개발 편의성)
+    # --no-reload 플래그가 있으면 비활성화
+    if args.no_reload:
+        reload_enabled = False
+    else:
+        # 기본적으로 활성화 (개발 편의성)
+        reload_enabled = True
     
     logger.info(f"Starting server on {args.host}:{args.port}")
     logger.info(f"Debug mode: {settings.debug}")

@@ -1,0 +1,315 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "created_at": "2025-10-31",
+    "description": "하이브리드 쿼리 처리를 위한 의도 분류 학습 데이터셋 (SIMPLE_AGGREGATION vs COMPLEX_ANALYSIS)",
+    "total_examples": 18,
+    "categories": {
+      "SIMPLE_AGGREGATION": 11,
+      "COMPLEX_ANALYSIS": 7,
+      "BOUNDARY_CASES": 4
+    }
+  },
+  "examples": [
+    {
+      "id": "simple_001",
+      "query": "전체 회원 수 몇 명이야?",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 1.0,
+      "reasoning": "단순 COUNT 집계로 SQL로 쉽게 처리 가능",
+      "category": "COUNT",
+      "tags": [
+        "회원",
+        "집계",
+        "COUNT"
+      ],
+      "expected_sql_pattern": "SELECT COUNT(*) FROM ..."
+    },
+    {
+      "id": "simple_002",
+      "query": "8월 매출 합계 알려줘",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 1.0,
+      "reasoning": "단순 SUM 집계로 SQL로 처리 가능",
+      "category": "SUM",
+      "tags": [
+        "매출",
+        "집계",
+        "SUM",
+        "월별"
+      ],
+      "expected_sql_pattern": "SELECT SUM(...) FROM ... WHERE ..."
+    },
+    {
+      "id": "simple_003",
+      "query": "최근 7일 신규 가입자 보여줘",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.95,
+      "reasoning": "날짜 필터링과 COUNT 조합으로 SQL로 처리 가능",
+      "category": "COUNT_WITH_FILTER",
+      "tags": [
+        "회원",
+        "집계",
+        "COUNT",
+        "날짜필터"
+      ],
+      "expected_sql_pattern": "SELECT COUNT(*) FROM ... WHERE ... BETWEEN ..."
+    },
+    {
+      "id": "simple_004",
+      "query": "월별 매출 합계",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 1.0,
+      "reasoning": "GROUP BY와 SUM 조합으로 SQL로 처리 가능",
+      "category": "GROUP_BY_AGGREGATE",
+      "tags": [
+        "매출",
+        "집계",
+        "SUM",
+        "GROUP BY",
+        "월별"
+      ],
+      "expected_sql_pattern": "SELECT ..., SUM(...) FROM ... GROUP BY ..."
+    },
+    {
+      "id": "simple_005",
+      "query": "크리에이터별 활성 회원 수 조회",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.95,
+      "reasoning": "GROUP BY와 COUNT 조합으로 SQL로 처리 가능",
+      "category": "GROUP_BY_COUNT",
+      "tags": [
+        "회원",
+        "집계",
+        "COUNT",
+        "GROUP BY",
+        "크리에이터"
+      ],
+      "expected_sql_pattern": "SELECT ..., COUNT(*) FROM ... GROUP BY ..."
+    },
+    {
+      "id": "simple_006",
+      "query": "평균 구독자 수를 알려줘",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 1.0,
+      "reasoning": "단순 AVG 집계로 SQL로 처리 가능",
+      "category": "AVG",
+      "tags": [
+        "구독자",
+        "집계",
+        "AVG"
+      ],
+      "expected_sql_pattern": "SELECT AVG(...) FROM ..."
+    },
+    {
+      "id": "simple_007",
+      "query": "이번 달 신규 회원 수 알려줘",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.95,
+      "reasoning": "날짜 필터링과 COUNT 조합으로 SQL로 처리 가능",
+      "category": "COUNT_WITH_FILTER",
+      "tags": [
+        "회원",
+        "집계",
+        "COUNT",
+        "월별"
+      ],
+      "expected_sql_pattern": "SELECT COUNT(*) FROM ... WHERE ..."
+    },
+    {
+      "id": "simple_008",
+      "query": "최고 매출을 기록한 크리에이터는?",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.9,
+      "reasoning": "MAX 집계와 ORDER BY로 SQL로 처리 가능",
+      "category": "MAX_ORDER_BY",
+      "tags": [
+        "매출",
+        "집계",
+        "MAX",
+        "ORDER BY"
+      ],
+      "expected_sql_pattern": "SELECT ..., MAX(...) FROM ... GROUP BY ... ORDER BY ..."
+    },
+    {
+      "id": "complex_001",
+      "query": "A 크리에이터 구독자 중 B 크리에이터도 구독하는 비율 알려줘",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 1.0,
+      "reasoning": "교집합 연산과 비율 계산이 필요하여 Python으로 처리해야 함",
+      "category": "INTERSECTION_RATIO",
+      "tags": [
+        "교집합",
+        "비율",
+        "구독자",
+        "분석"
+      ],
+      "requires_python": true,
+      "python_operations": [
+        "교집합 계산",
+        "비율 계산"
+      ]
+    },
+    {
+      "id": "complex_002",
+      "query": "최근 3개월 매출 트렌드 분석해줘",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 0.95,
+      "reasoning": "시계열 분석과 트렌드 계산이 필요하여 Python으로 처리해야 함",
+      "category": "TIME_SERIES_ANALYSIS",
+      "tags": [
+        "시계열",
+        "트렌드",
+        "분석",
+        "매출"
+      ],
+      "requires_python": true,
+      "python_operations": [
+        "시계열 분석",
+        "트렌드 계산",
+        "시각화"
+      ]
+    },
+    {
+      "id": "complex_003",
+      "query": "상위 10개 크리에이터의 평균 구독자 증가율 비교해줘",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 0.95,
+      "reasoning": "여러 단계의 데이터 가공과 비교 분석이 필요하여 Python으로 처리해야 함",
+      "category": "COMPARATIVE_ANALYSIS",
+      "tags": [
+        "비교",
+        "증가율",
+        "분석",
+        "크리에이터"
+      ],
+      "requires_python": true,
+      "python_operations": [
+        "증가율 계산",
+        "비교 분석",
+        "정렬"
+      ]
+    },
+    {
+      "id": "complex_004",
+      "query": "A와 B 크리에이터의 공통 구독자 수와 전체 구독자 대비 비율",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 1.0,
+      "reasoning": "교집합 연산과 비율 계산이 필요하여 Python으로 처리해야 함",
+      "category": "INTERSECTION_RATIO",
+      "tags": [
+        "교집합",
+        "비율",
+        "구독자",
+        "분석"
+      ],
+      "requires_python": true,
+      "python_operations": [
+        "교집합 계산",
+        "합집합 계산",
+        "비율 계산"
+      ]
+    },
+    {
+      "id": "complex_005",
+      "query": "월별 매출 성장률과 전월 대비 증가분을 보여줘",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 0.9,
+      "reasoning": "성장률 계산과 전월 대비 비교가 필요하여 Python으로 처리해야 함",
+      "category": "GROWTH_RATE_ANALYSIS",
+      "tags": [
+        "성장률",
+        "비교",
+        "매출",
+        "분석"
+      ],
+      "requires_python": true,
+      "python_operations": [
+        "성장률 계산",
+        "전월 대비 계산",
+        "시각화"
+      ]
+    },
+    {
+      "id": "complex_006",
+      "query": "크리에이터 A와 B의 구독자 리텐션율을 비교 분석해줘",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 0.95,
+      "reasoning": "리텐션율 계산과 비교 분석이 필요하여 Python으로 처리해야 함",
+      "category": "RETENTION_ANALYSIS",
+      "tags": [
+        "리텐션",
+        "비교",
+        "분석",
+        "구독자"
+      ],
+      "requires_python": true,
+      "python_operations": [
+        "리텐션율 계산",
+        "비교 분석"
+      ]
+    },
+    {
+      "id": "boundary_001",
+      "query": "크리에이터별 평균 매출을 보여줘",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.85,
+      "reasoning": "GROUP BY와 AVG 조합으로 SQL로 처리 가능하지만, 추가 분석이 필요할 수 있음",
+      "category": "BOUNDARY_CASE",
+      "tags": [
+        "매출",
+        "집계",
+        "AVG",
+        "GROUP BY"
+      ],
+      "notes": "간단하지만 복잡한 분석으로 확장 가능",
+      "expected_sql_pattern": "SELECT ..., AVG(...) FROM ... GROUP BY ..."
+    },
+    {
+      "id": "boundary_002",
+      "query": "월별 회원 가입 추이를 분석해줘",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.8,
+      "reasoning": "GROUP BY로 기본 집계는 가능하지만, '추이 분석'은 Python이 더 적합할 수 있음",
+      "category": "BOUNDARY_CASE",
+      "tags": [
+        "회원",
+        "집계",
+        "GROUP BY",
+        "추이"
+      ],
+      "notes": "SQL로 기본 데이터 조회 후 Python으로 추이 분석이 더 정확",
+      "recommended_approach": "하이브리드: SQL로 기본 데이터 조회 → Python으로 추이 분석"
+    },
+    {
+      "id": "boundary_003",
+      "query": "전체 회원 중 활성 회원의 비율은?",
+      "intent": "SIMPLE_AGGREGATION",
+      "confidence": 0.9,
+      "reasoning": "COUNT와 조건부 COUNT로 비율 계산이 가능하여 SQL로 처리 가능",
+      "category": "BOUNDARY_CASE",
+      "tags": [
+        "회원",
+        "비율",
+        "COUNT"
+      ],
+      "notes": "비율 계산이지만 단순 계산으로 SQL 가능",
+      "expected_sql_pattern": "SELECT COUNT(CASE WHEN ... THEN 1 END) / COUNT(*) FROM ..."
+    },
+    {
+      "id": "boundary_004",
+      "query": "최근 3개월 동안 가장 많이 증가한 크리에이터",
+      "intent": "COMPLEX_ANALYSIS",
+      "confidence": 0.85,
+      "reasoning": "증가율 계산이 필요하지만, SQL로도 처리 가능할 수 있음",
+      "category": "BOUNDARY_CASE",
+      "tags": [
+        "증가",
+        "분석",
+        "크리에이터"
+      ],
+      "notes": "SQL로 가능하지만 Python이 더 정확한 분석 가능",
+      "recommended_approach": "SQL로 기본 데이터 조회 → Python으로 증가율 계산 및 분석"
+    }
+  ]
+}

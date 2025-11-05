@@ -1,0 +1,8 @@
+{"timestamp": 1761811214.4106536, "metrics": {"intent": "HELP_REQUEST", "confidence": 1.0, "response_time_ms": 1704.8845291137695, "timestamp": 1761811214.4106536, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1761811222.4477808, "metrics": {"intent": "HELP_REQUEST", "confidence": 1.0, "response_time_ms": 9751.52325630188, "timestamp": 1761811222.4477808, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1761811237.1478312, "metrics": {"intent": "UNKNOWN", "confidence": 0.0, "response_time_ms": 3337.2607231140137, "timestamp": 1761811237.1478312, "is_error": true}, "type": "raw_metrics"}
+{"timestamp": 1761816371.3387694, "metrics": {"intent": "DATA_QUERY", "confidence": 0.95, "response_time_ms": 1736.5264892578125, "timestamp": 1761816371.3387694, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1761816417.5354838, "metrics": {"intent": "UNKNOWN", "confidence": 0.0, "response_time_ms": 3482.570171356201, "timestamp": 1761816417.5354838, "is_error": true}, "type": "raw_metrics"}
+{"timestamp": 1761816439.0036964, "metrics": {"intent": "UNKNOWN", "confidence": 0.0, "response_time_ms": 24953.533172607422, "timestamp": 1761816439.0036964, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1761816454.9023654, "metrics": {"intent": "UNKNOWN", "confidence": 0.0, "response_time_ms": 5482.840061187744, "timestamp": 1761816454.9023654, "is_error": true}, "type": "raw_metrics"}
+{"timestamp": 1761816475.294026, "metrics": {"intent": "UNKNOWN", "confidence": 0.0, "response_time_ms": 25876.11699104309, "timestamp": 1761816475.294026, "is_error": false}, "type": "raw_metrics"}

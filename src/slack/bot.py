@@ -129,7 +129,6 @@ class SlackBot:
             
         except Exception as e:
             logger.error(f"Failed to setup Slack handlers: {e}")
-            # Fallback to basic handlers
             self._setup_fallback_handlers()
     
     def _setup_fallback_handlers(self):
@@ -312,14 +311,35 @@ Just type your question in natural language! For example:
                     app_token=self.config.app_token
                 )
                 logger.info("Starting Slack bot in Socket Mode...")
-                handler.start()
+                # Use connect() instead of start() to avoid signal handler issues in threads
+                # connect() runs in a loop, so we need to keep it running
+                # Add retry logic for connection failures
+                max_retries = 5
+                retry_delay = 5
+                
+                for attempt in range(max_retries):
+                    try:
+                        logger.info(f"Attempting Socket Mode connection (attempt {attempt + 1}/{max_retries})...")
+                        handler.connect()
+                        # If connect() returns, connection was successful
+                        logger.info("Socket Mode connection established successfully")
+                        break
+                    except Exception as connect_error:
+                        logger.error(f"Socket Mode connection error (attempt {attempt + 1}/{max_retries}): {connect_error}", exc_info=True)
+                        if attempt < max_retries - 1:
+                            logger.info(f"Retrying in {retry_delay} seconds...")
+                            import time
+                            time.sleep(retry_delay)
+                        else:
+                            logger.error("Failed to establish Socket Mode connection after all retries")
+                            raise
             else:
                 # Use HTTP mode (for production)
                 logger.info("Starting Slack bot in HTTP Mode...")
                 self.app.start(port=int(os.getenv("PORT", 3000)))
                 
         except Exception as e:
-            logger.error(f"Failed to start Slack bot: {e}")
+            logger.error(f"Failed to start Slack bot: {e}", exc_info=True)
             raise
     
     def stop(self):

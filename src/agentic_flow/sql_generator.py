@@ -112,7 +112,7 @@ class SQLGenerator(BaseNode):
         self._log_processing(state, "SQLGenerator")
         
         try:
-            normalized_query = state.get("normalized_query", "")
+            user_query = state.get("user_query", "")
             intent = state.get("intent")
             entities = state.get("entities", [])
             schema_mapping = state.get("schema_mapping")
@@ -121,8 +121,8 @@ class SQLGenerator(BaseNode):
                 state["error_message"] = "Schema mapping required for SQL generation"
                 return state
             
-            if not normalized_query:
-                state["error_message"] = "Normalized query required for SQL generation"
+            if not user_query or not user_query.strip():
+                state["error_message"] = "User query required for SQL generation"
                 return state
             
             if not intent:
@@ -131,7 +131,7 @@ class SQLGenerator(BaseNode):
             
             # Generate SQL
             sql_query = self._generate_sql(
-                normalized_query, intent, entities, schema_mapping
+                user_query, intent, entities, schema_mapping
             )
             
             # Validate and optimize SQL

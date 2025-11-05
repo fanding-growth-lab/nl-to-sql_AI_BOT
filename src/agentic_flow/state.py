@@ -11,18 +11,21 @@ from enum import Enum
 
 class QueryIntent(Enum):
     """Query intent classification."""
-    # 데이터 조회 관련
-    DATA_QUERY = "DATA_QUERY"       # 데이터 조회 의도
+    # 일반 대화 관련
+    GREETING = "GREETING"           # 인사말
+    GENERAL_CHAT = "GENERAL_CHAT"   # 일반 대화
+    HELP_REQUEST = "HELP_REQUEST"   # 도움말 요청
+    
+    # 데이터 조회 관련 (하이브리드 분류)
+    SIMPLE_AGGREGATION = "SIMPLE_AGGREGATION"  # 간단한 집계 → SQL로 처리
+    COMPLEX_ANALYSIS = "COMPLEX_ANALYSIS"      # 복잡한 분석 → Python으로 처리
+    
+    # 기존 SQL 관련 (하위 호환성 유지, 향후 제거 가능)
     SELECT = "SELECT"
     COUNT = "COUNT" 
     AGGREGATE = "AGGREGATE"
     FILTER = "FILTER"
     JOIN = "JOIN"
-    
-    # 일반 대화 관련
-    GREETING = "GREETING"           # 인사말
-    GENERAL_CHAT = "GENERAL_CHAT"   # 일반 대화
-    HELP_REQUEST = "HELP_REQUEST"   # 도움말 요청
     
     # 알 수 없음
     UNKNOWN = "UNKNOWN"
@@ -87,9 +90,19 @@ class GraphState(TypedDict):
     sql_corrected: Optional[str]
     sql_validation: Optional[Dict[str, Any]]
     rag_mapping_result: Optional[Any]
+    rag_schema_chunks: Optional[List[Dict[str, Any]]]  # RAG schema retrieval results
+    rag_schema_context: Optional[str]  # Formatted schema context for prompts
     dynamic_pattern: Optional[Any]
     fanding_template: Optional[Any]
     agent_schema_mapping: Optional[Dict[str, Any]]
+    
+    # Python Code Generation (for COMPLEX_ANALYSIS)
+    python_code: Optional[str]
+    python_code_result: Optional[Dict[str, Any]]
+    python_code_error: Optional[str]
+    python_execution_result: Optional[Dict[str, Any]]
+    python_execution_error: Optional[str]
+    data_gathering_sql: Optional[str]  # Phase 2: Python 코드 실행에 필요한 데이터를 가져올 SQL
     
     # Query execution results
     query_result: List[Dict[str, Any]]
@@ -169,9 +182,16 @@ def create_initial_state(
         "sql_corrected": None,
         "sql_validation": None,
         "rag_mapping_result": None,
+        "rag_schema_chunks": None,
+        "rag_schema_context": None,
         "dynamic_pattern": None,
         "fanding_template": None,
         "agent_schema_mapping": None,
+        "python_code": None,
+        "python_code_result": None,
+        "python_code_error": None,
+        "python_execution_result": None,
+        "python_execution_error": None,
         "query_result": [],
         "skip_sql_generation": None,
         "conversation_response": None,

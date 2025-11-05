@@ -201,13 +201,19 @@ class SQLPromptTemplate:
             removed = self.examples.pop(index)
             self.logger.debug(f"Removed example: {removed.question[:50]}...")
     
-    def get_relevant_examples(self, query: str, limit: Optional[int] = None) -> List[SQLExample]:
+    def get_relevant_examples(
+        self, 
+        query: str, 
+        limit: Optional[int] = None,
+        relevant_tables: Optional[List[str]] = None
+    ) -> List[SQLExample]:
         """
         사용자 쿼리와 관련성이 높은 예제들을 선택
         
         Args:
             query: 사용자 쿼리
             limit: 반환할 최대 예제 수
+            relevant_tables: RAG로 검색된 관련 테이블 목록 (선택사항)
             
         Returns:
             관련성이 높은 예제 리스트
@@ -243,11 +249,30 @@ class SQLPromptTemplate:
             if 'join' in query_lower and 'join' in sql_lower:
                 score += 1
             
+            # RAG로 검색된 관련 테이블과 예제의 SQL에 사용된 테이블 매칭 (추가 점수)
+            if relevant_tables:
+                # 예제 SQL에서 테이블명 추출
+                sql_tables = re.findall(r'FROM\s+(?:`)?(t_\w+)(?:`)?', sql_lower, re.IGNORECASE)
+                sql_tables.extend(re.findall(r'JOIN\s+(?:`)?(t_\w+)(?:`)?', sql_lower, re.IGNORECASE))
+                
+                # 관련 테이블과 일치하는 경우 점수 추가
+                for table in relevant_tables:
+                    if table.lower() in [t.lower() for t in sql_tables]:
+                        score += 3  # 테이블 매칭은 높은 가중치
+                        self.logger.debug(f"Example matched relevant table: {table}")
+            
             scored_examples.append((score, example))
         
         # 점수 순으로 정렬하고 상위 예제들 반환
         scored_examples.sort(key=lambda x: x[0], reverse=True)
-        return [example for score, example in scored_examples[:limit]]
+        selected_examples = [example for score, example in scored_examples[:limit]]
+        
+        if relevant_tables:
+            self.logger.debug(
+                f"Selected {len(selected_examples)} examples based on query and relevant tables: {relevant_tables}"
+            )
+        
+        return selected_examples
     
     def format_schema(self) -> str:
         """
@@ -316,13 +341,21 @@ class SQLPromptTemplate:
         
         return examples_text
     
-    def create_prompt(self, user_query: str, include_relevant_examples: bool = True) -> str:
+    def create_prompt(
+        self, 
+        user_query: str, 
+        include_relevant_examples: bool = True,
+        rag_context: Optional[str] = None,
+        max_context_length: int = 4000
+    ) -> str:
         """
         사용자 쿼리에 대한 최종 프롬프트 생성
         
         Args:
             user_query: 사용자의 자연어 쿼리
             include_relevant_examples: 관련성 높은 예제만 포함할지 여부
+            rag_context: RAG로 검색된 관련 스키마 컨텍스트 (선택사항)
+            max_context_length: 최대 컨텍스트 길이 (토큰 수 제한 대략적 추정)
             
         Returns:
             완성된 프롬프트 문자열
@@ -339,12 +372,29 @@ class SQLPromptTemplate:
 
 """
         
-        # 스키마 정보 추가
-        schema_section = self.format_schema()
+        # RAG 컨텍스트가 있으면 우선 사용 (더 정확한 관련 스키마 정보)
+        if rag_context:
+            # RAG 컨텍스트를 주요 스키마 섹션으로 사용
+            schema_section = f"📊 관련 스키마 정보 (RAG 검색 결과):\n\n{rag_context}\n"
+            self.logger.debug("Using RAG context as primary schema source")
+        else:
+            # 전체 스키마 정보 사용
+            schema_section = self.format_schema()
+            self.logger.debug("Using full database schema")
         
-        # 예제 정보 추가
+        # 예제 정보 추가 (RAG 컨텍스트의 테이블 정보를 활용하여 관련 예제 선택)
         if include_relevant_examples:
-            relevant_examples = self.get_relevant_examples(user_query)
+            # RAG 컨텍스트에서 테이블명 추출하여 예제 선택 개선
+            relevant_tables = []
+            if rag_context:
+                import re
+                table_matches = re.findall(r'## (t_\w+)', rag_context)
+                relevant_tables = list(set(table_matches))
+            
+            relevant_examples = self.get_relevant_examples(
+                user_query, 
+                relevant_tables=relevant_tables
+            )
             examples_section = self.format_examples(relevant_examples)
         else:
             examples_section = self.format_examples()
@@ -355,7 +405,15 @@ class SQLPromptTemplate:
         # 최종 프롬프트 조합
         prompt = f"{system_prompt}{schema_section}\n{examples_section}\n{user_section}"
         
-        self.logger.debug(f"Generated prompt for query: {user_query[:50]}...")
+        # 컨텍스트 길이 확인 및 경고 (대략적 추정: 한글 1자 ≈ 1-2 토큰)
+        estimated_length = len(prompt)
+        if estimated_length > max_context_length:
+            self.logger.warning(
+                f"Prompt length ({estimated_length}) exceeds recommended limit ({max_context_length}). "
+                f"Consider reducing context size."
+            )
+        
+        self.logger.debug(f"Generated prompt for query: {user_query[:50]}... (length: {estimated_length})")
         return prompt
     
     def save_examples_to_file(self, file_path: Union[str, Path]):
@@ -752,3 +810,173 @@ class GeminiSQLGenerator:
             "issues": issues,
             "sql": sql
         }
+
+
+# ============================================================================
+# Conversation Response Templates and Patterns
+# ============================================================================
+
+# Intent Classification Patterns (for LLM prompt context)
+GREETING_PATTERNS = [
+    "안녕", "반가워", "hello", "hi", "좋은 아침", "좋은 저녁", 
+    "환영", "인사", "만나서 반가워", "반갑습니다", "안녕하세요",
+    "안녕하세요", "반갑습니다", "처음 뵙겠습니다", "만나서 반갑습니다",
+    "좋은 하루", "좋은 하루 되세요", "좋은 하루 보내세요"
+]
+
+HELP_REQUEST_PATTERNS = [
+    "도움", "사용법", "어떻게", "help", "명령어", 
+    "도와줘", "설명", "가이드", "사용법", "도움말",
+    "사용법 알려줘", "어떻게 사용하나요", "기능", "기능이 뭐야",
+    "뭐가 있어", "뭘 할 수 있어", "할 수 있는 것", "기능 설명",
+    "너가 할 수 있는 일", "뭐야", "뭐지", "뭔가", "뭔데"
+]
+
+GENERAL_CHAT_PATTERNS = [
+    "어때", "어떠", "좋아", "나쁘", "재미", "재미있", "지루", "피곤",
+    "날씨", "오늘", "어제", "내일", "주말", "휴일", "일", "일정",
+    "고마워", "감사", "미안", "죄송", "괜찮", "괜찮아", "괜찮습니다",
+    "뭐야", "뭐지", "뭔가", "뭔데", "뭔가요", "뭔가요?"
+]
+
+GRATITUDE_PATTERNS = [
+    "고마워", "감사", "감사합니다", "고마워요", "고맙습니다",
+    "수고", "수고하셨", "수고하셨어요", "수고하셨습니다"
+]
+
+# Response Templates
+GREETING_RESPONSES = [
+    "안녕하세요! 👋 Fanding Data Report 봇입니다. 무엇을 도와드릴까요?",
+    "안녕하세요! 😊 데이터 분석을 도와드리겠습니다.",
+    "반갑습니다! 🤖 멤버십 성과나 회원 데이터를 조회해드릴 수 있어요.",
+    "안녕하세요! 📊 Fanding 데이터를 분석해드리겠습니다."
+]
+
+GENERAL_CHAT_RESPONSES = [
+    "안녕하세요! 😊 데이터 분석에 대해 궁금한 것이 있으시면 언제든 말씀해주세요!",
+    "네, 듣고 있어요! 📊 Fanding 데이터를 조회하고 싶으시면 말씀해주세요.",
+    "좋은 하루 보내세요! 🤖 멤버십 성과나 회원 데이터가 궁금하시면 언제든 물어보세요.",
+    "감사합니다! 😊 데이터 분석을 도와드릴 준비가 되어있어요."
+]
+
+
+def generate_greeting_response(user_query: str) -> str:
+    """
+    인사말에 대한 랜덤 응답 생성
+    
+    Args:
+        user_query: 사용자 쿼리 (현재는 사용되지 않지만 향후 개인화 가능)
+        
+    Returns:
+        인사 응답 문자열
+    """
+    import random
+    return random.choice(GREETING_RESPONSES)
+
+
+def generate_help_response(user_query: str) -> str:
+    """
+    도움말 요청에 대한 응답 생성
+    
+    Args:
+        user_query: 사용자 쿼리 (현재는 사용되지 않지만 향후 개인화 가능)
+        
+    Returns:
+        도움말 응답 문자열
+    """
+    return """🤖 **Fanding Data Report 봇 사용법**
+
+**📊 데이터 조회 기능:**
+• "활성 회원 수 조회해줘" - 활성 회원 수 확인
+• "8월 멤버십 성과 분석해줘" - 특정 월 성과 분석
+• "전체 회원 수 보여줘" - 전체 회원 수 확인
+• "신규 회원 현황 알려줘" - 신규 회원 현황
+
+**💡 사용 팁:**
+• 구체적인 질문을 해주세요 (예: "8월 성과", "활성 회원")
+• 날짜나 기간을 명시해주세요 (예: "이번 달", "지난 주")
+• 멤버십, 회원, 성과 등 키워드를 포함해주세요
+
+**❓ 궁금한 점이 있으시면 언제든 말씀해주세요!**"""
+
+
+def generate_general_chat_response(user_query: str) -> str:
+    """
+    일반 대화에 대한 랜덤 응답 생성
+    
+    Args:
+        user_query: 사용자 쿼리 (현재는 사용되지 않지만 향후 개인화 가능)
+        
+    Returns:
+        일반 대화 응답 문자열
+    """
+    import random
+    return random.choice(GENERAL_CHAT_RESPONSES)
+
+
+def generate_error_response(error: Exception) -> str:
+    """
+    에러에 대한 사용자 친화적인 응답 생성
+    
+    Args:
+        error: 발생한 예외 객체
+        
+    Returns:
+        에러 응답 문자열
+    """
+    error_type = type(error).__name__
+    
+    # 특정 에러 타입별 맞춤형 응답
+    if "UnicodeEncodeError" in error_type:
+        return """😅 **인코딩 오류가 발생했습니다**
+
+죄송합니다. 특수 문자나 이모지 처리 중 문제가 발생했어요.
+다시 시도해주시거나 다른 방식으로 질문해주세요! 🤖"""
+    
+    elif "ConnectionError" in error_type or "TimeoutError" in error_type:
+        return """🌐 **연결 오류가 발생했습니다**
+
+데이터베이스나 외부 서비스 연결에 문제가 있어요.
+잠시 후 다시 시도해주세요! 🔄"""
+    
+    elif "ValueError" in error_type or "TypeError" in error_type:
+        return """⚠️ **입력 처리 오류가 발생했습니다**
+
+질문을 이해하는 데 문제가 있었어요.
+다른 방식으로 질문해주시면 도와드릴게요! 💡"""
+    
+    else:
+        return """😔 **처리 중 오류가 발생했습니다**
+
+예상치 못한 문제가 발생했어요.
+다시 시도해주시거나 기술팀에 문의해주세요! 🛠️
+
+**💡 도움말:** "사용법 알려줘"라고 말씀해주시면 사용법을 안내해드릴게요."""
+
+
+def generate_clarification_question(user_query: str) -> str:
+    """
+    애매한 쿼리에 대한 명확화 질문 생성
+    
+    Args:
+        user_query: 사용자 쿼리
+        
+    Returns:
+        명확화 질문 문자열
+    """
+    q = user_query.lower()
+    needs_topk = ("top" in q or "상위" in q or "top5" in q)
+    needs_period = any(k in q for k in ["이번", "지난", "이번달", "지난달", "월", "분기", "주", "week", "month", "quarter"])
+    needs_metric = any(k in q for k in ["회원수", "신규", "활성", "로그인", "조회수", "매출", "판매"]) 
+    
+    parts = []
+    if needs_period:
+        parts.append("기간(예: 2025-08, 지난달)을 알려주세요.")
+    if needs_topk:
+        parts.append("상위 K 개(예: Top5)는 몇 개를 원하시나요?")
+    if needs_metric:
+        parts.append("어떤 지표를 기준으로 랭킹을 원하시나요? (예: 신규 회원수)")
+    if not parts:
+        parts.append("기간/지표/Top-K 중 필요한 정보를 알려주세요.")
+    
+    return "질의를 정확히 처리하기 위해 다음을 확인해 주세요: " + " ".join(parts)

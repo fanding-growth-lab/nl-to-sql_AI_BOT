@@ -2,19 +2,82 @@
   "query_patterns": {
     "general_query": {
       "pattern": "안녕",
-      "frequency": 12,
-      "success_rate": 0.08333333333333333,
-      "avg_confidence": 1.0,
-      "last_used": "2025-10-30T12:55:18.978162",
+      "frequency": 124,
+      "success_rate": 0.05645161290322584,
+      "avg_confidence": 0.8790322580645162,
+      "last_used": "2025-11-04T14:35:43.948722",
       "common_variations": [],
       "user_feedback": []
     },
     "MONTH_9_MEMBER_QUERY_ACTION_COUNT": {
       "pattern": "9월 신규 회원 현황 알려줘.",
-      "frequency": 7,
+      "frequency": 20,
+      "success_rate": 0.15,
+      "avg_confidence": 0.9949999999999999,
+      "last_used": "2025-11-05T15:45:43.032731",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "MONTH_8_MEMBER_QUERY_ACTION_PERFORMANCE": {
+      "pattern": "8월 멤버십 성과 분석해줘",
+      "frequency": 34,
+      "success_rate": 0.0,
+      "avg_confidence": 0.5132352941176471,
+      "last_used": "2025-11-03T17:07:45.310500",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "MEMBER_QUERY_ACTION_COUNT": {
+      "pattern": "크리에이터별 활성 회원 수 조회",
+      "frequency": 43,
+      "success_rate": 0.13953488372093023,
+      "avg_confidence": 0.8788372093023257,
+      "last_used": "2025-11-03T13:21:35.492356",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "MONTH_8_MEMBER_QUERY_ACTION_COUNT": {
+      "pattern": "8월 신규회원 수를 알려줘.",
+      "frequency": 21,
+      "success_rate": 0.23809523809523808,
+      "avg_confidence": 0.7095238095238097,
+      "last_used": "2025-11-05T10:15:26.123095",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "COUNT": {
+      "pattern": "너가 할수 있는일이뭐야?",
+      "frequency": 6,
       "success_rate": 0.0,
       "avg_confidence": 1.0,
-      "last_used": "2025-10-30T15:23:46.065748",
+      "last_used": "2025-11-04T14:36:16.162966",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "MONTH_10_MEMBER_COUNT": {
+      "pattern": "세상학개론 크리에이터의 10월 신규가입자를 알 수 있을까?",
+      "frequency": 2,
+      "success_rate": 0.5,
+      "avg_confidence": 1.0,
+      "last_used": "2025-11-04T11:31:00.324985",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "CREATOR_COUNT": {
+      "pattern": "creator_id나 db에서 크리에이터명을 직접 저장 혹은 매칭시켜서 가져올수는 없어?",
+      "frequency": 2,
+      "success_rate": 0.0,
+      "avg_confidence": 1.0,
+      "last_used": "2025-11-04T11:45:39.004262",
+      "common_variations": [],
+      "user_feedback": []
+    },
+    "MONTH_10_MEMBER_QUERY_ACTION_COUNT": {
+      "pattern": "그럼 크리에이터 '세상학 개론'의 10월 신규 회원수를 보여줘!",
+      "frequency": 22,
+      "success_rate": 0.22727272727272727,
+      "avg_confidence": 0.9090909090909091,
+      "last_used": "2025-11-05T16:51:59.912277",
       "common_variations": [],
       "user_feedback": []
     }
@@ -22,28 +85,166 @@
   "user_behaviors": {
     "unknown": {
       "query_preferences": {
-        "general_query": 12,
-        "MONTH_9_MEMBER_QUERY_ACTION_COUNT": 7
+        "general_query": 76,
+        "MONTH_9_MEMBER_QUERY_ACTION_COUNT": 15,
+        "MONTH_8_MEMBER_QUERY_ACTION_PERFORMANCE": 19,
+        "MEMBER_QUERY_ACTION_COUNT": 21,
+        "MONTH_8_MEMBER_QUERY_ACTION_COUNT": 14,
+        "COUNT": 3,
+        "MONTH_10_MEMBER_COUNT": 1,
+        "CREATOR_COUNT": 1,
+        "MONTH_10_MEMBER_QUERY_ACTION_COUNT": 12
       },
       "time_patterns": {
-        "17:00": 3,
-        "12:00": 3,
-        "15:00": 2,
-        "16:00": 4,
-        "18:00": 2,
-        "10:00": 2,
-        "11:00": 2,
+        "17:00": 14,
+        "12:00": 5,
+        "15:00": 7,
+        "16:00": 8,
+        "18:00": 20,
+        "10:00": 14,
+        "11:00": 21,
+        "13:00": 3,
+        "14:00": 26,
+        "19:00": 3,
+        "08:00": 16,
+        "09:00": 25
+      },
+      "success_rate": 0.006172839506172839,
+      "feedback_history": []
+    },
+    "U08MZB4CQDD": {
+      "query_preferences": {
+        "general_query": 22,
+        "MONTH_8_MEMBER_QUERY_ACTION_PERFORMANCE": 6,
+        "COUNT": 3,
+        "MONTH_10_MEMBER_COUNT": 1,
+        "CREATOR_COUNT": 1,
+        "MONTH_10_MEMBER_QUERY_ACTION_COUNT": 10,
+        "MONTH_9_MEMBER_QUERY_ACTION_COUNT": 5
+      },
+      "time_patterns": {
+        "17:00": 4,
+        "18:00": 4,
+        "14:00": 13,
+        "08:00": 1,
+        "09:00": 1,
+        "10:00": 4,
+        "11:00": 14,
+        "15:00": 3,
+        "12:00": 1,
+        "13:00": 2,
+        "16:00": 1
+      },
+      "success_rate": 0.20833333333333334,
+      "feedback_history": []
+    },
+    "U078LC4NZFY": {
+      "query_preferences": {
+        "MONTH_8_MEMBER_QUERY_ACTION_PERFORMANCE": 1
+      },
+      "time_patterns": {
+        "18:00": 1
+      },
+      "success_rate": 0.0,
+      "feedback_history": []
+    },
+    "test_user": {
+      "query_preferences": {
+        "MONTH_8_MEMBER_QUERY_ACTION_PERFORMANCE": 8,
+        "MEMBER_QUERY_ACTION_COUNT": 16,
+        "MONTH_8_MEMBER_QUERY_ACTION_COUNT": 2,
+        "general_query": 5
+      },
+      "time_patterns": {
+        "11:00": 9,
+        "12:00": 2,
+        "14:00": 8,
+        "16:00": 2,
+        "17:00": 2,
+        "18:00": 4,
+        "10:00": 4
+      },
+      "success_rate": 0.16129032258064516,
+      "feedback_history": []
+    },
+    "b0f6c576-fe52-426f-91e0-0e6ae4e526a4": {
+      "query_preferences": {
+        "MONTH_8_MEMBER_QUERY_ACTION_COUNT": 1
+      },
+      "time_patterns": {
+        "18:00": 1
+      },
+      "success_rate": 1.0,
+      "feedback_history": []
+    },
+    "test_session_1": {
+      "query_preferences": {
+        "MONTH_8_MEMBER_QUERY_ACTION_COUNT": 3
+      },
+      "time_patterns": {
+        "10:00": 3
+      },
+      "success_rate": 1.0,
+      "feedback_history": []
+    },
+    "test_session_2": {
+      "query_preferences": {
+        "MEMBER_QUERY_ACTION_COUNT": 4
+      },
+      "time_patterns": {
+        "10:00": 4
+      },
+      "success_rate": 1.0,
+      "feedback_history": []
+    },
+    "test_simple_0": {
+      "query_preferences": {
+        "MEMBER_QUERY_ACTION_COUNT": 1
+      },
+      "time_patterns": {
         "13:00": 1
       },
-      "success_rate": 0.05263157894736842,
+      "success_rate": 1.0,
+      "feedback_history": []
+    },
+    "test_simple_1": {
+      "query_preferences": {
+        "MONTH_8_MEMBER_QUERY_ACTION_COUNT": 1
+      },
+      "time_patterns": {
+        "13:00": 1
+      },
+      "success_rate": 1.0,
+      "feedback_history": []
+    },
+    "test_simple_2": {
+      "query_preferences": {
+        "MEMBER_QUERY_ACTION_COUNT": 1
+      },
+      "time_patterns": {
+        "13:00": 1
+      },
+      "success_rate": 1.0,
+      "feedback_history": []
+    },
+    "test_user_001": {
+      "query_preferences": {
+        "general_query": 21
+      },
+      "time_patterns": {
+        "18:00": 6,
+        "19:00": 3,
+        "08:00": 12
+      },
+      "success_rate": 0.0,
       "feedback_history": []
     }
   },
   "learning_metrics": {
-    "total_queries": 19,
-    "successful_mappings": 1,
-    "failed_mappings": 18,
-    "avg_confidence": 1.0,
+    "total_queries": 274,
+    "successful_mappings": 27,
+    "failed_mappings": 247,
+    "avg_confidence": 0.8359124087591243,
     "most_common_patterns": [],
     "improvement_suggestions": []
   }

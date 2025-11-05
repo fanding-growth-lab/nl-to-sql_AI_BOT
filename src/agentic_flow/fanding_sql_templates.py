@@ -37,17 +37,30 @@ class SQLTemplate:
 class FandingSQLTemplates:
     """Fanding Data Report SQL Templates"""
     
-    def __init__(self):
+    def __init__(self, db_schema: Optional[Dict[str, Any]] = None):
         self.templates = self._initialize_templates()
         self.logger = logging.getLogger(__name__)
-        # 중앙화된 스키마 정보 로드
-        self.db_schema = get_cached_db_schema()
+        # db_schema가 제공되지 않으면 초기화 시점에 한 번만 로드 (성능 최적화)
+        if db_schema is None or len(db_schema) == 0:
+            self.db_schema = get_cached_db_schema()
+            self.logger.debug("db_schema was not provided, loaded from cache during initialization")
+        else:
+            self.db_schema = db_schema
+        
+        # 스키마가 fallback인지 확인 (DB 연결 실패 시)
+        self._is_fallback_schema = self._check_if_fallback_schema()
         
         # 템플릿 검증 실행 (중요: 스키마 동기화 확인)
+        # 단, fallback 스키마일 때는 경고만 표시하고 오류로 처리하지 않음
         self._validate_templates()
     
     def _initialize_templates(self) -> Dict[str, SQLTemplate]:
-        """Initialize all Fanding SQL templates"""
+        """
+        Initialize all Fanding SQL templates
+        
+        주의: db_schema는 __init__에서 로드되므로, 여기서는 아직 사용할 수 없습니다.
+        템플릿은 정적으로 정의하고, 실제 사용 시 db_schema를 기반으로 검증/수정됩니다.
+        """
         templates = {}
         
         # 멤버십 데이터 분석 템플릿
@@ -63,6 +76,106 @@ class FandingSQLTemplates:
         templates.update(self._get_advanced_templates())
         
         return templates
+    
+    def _get_table_info(self, table_name: str) -> Optional[Dict[str, Any]]:
+        """
+        db_schema에서 테이블 정보 가져오기 (헬퍼 메서드)
+        
+        Args:
+            table_name: 테이블명
+            
+        Returns:
+            테이블 정보 딕셔너리 또는 None
+        """
+        if not self.db_schema or len(self.db_schema) == 0:
+            return None
+        return self.db_schema.get(table_name)
+    
+    def _get_table_columns(self, table_name: str) -> Dict[str, Any]:
+        """
+        db_schema에서 테이블의 컬럼 정보 가져오기 (헬퍼 메서드)
+        
+        Args:
+            table_name: 테이블명
+            
+        Returns:
+            컬럼 딕셔너리 (빈 딕셔너리 반환 가능)
+        """
+        table_info = self._get_table_info(table_name)
+        if not table_info:
+            return {}
+        return table_info.get("columns", {})
+    
+    def _find_pk_column(self, table_name: str) -> Optional[str]:
+        """
+        테이블의 Primary Key 컬럼 찾기
+        
+        Args:
+            table_name: 테이블명
+            
+        Returns:
+            PK 컬럼명 또는 None
+        """
+        columns = self._get_table_columns(table_name)
+        # 일반적인 PK 컬럼명 후보
+        pk_candidates = ['no', 'id', f'{table_name.replace("t_", "")}_no', 'member_no']
+        for candidate in pk_candidates:
+            if candidate in columns:
+                return candidate
+        return None
+    
+    def _has_column(self, table_name: str, column_name: str) -> bool:
+        """
+        테이블에 특정 컬럼이 있는지 확인
+        
+        Args:
+            table_name: 테이블명
+            column_name: 컬럼명
+            
+        Returns:
+            컬럼 존재 여부
+        """
+        columns = self._get_table_columns(table_name)
+        return column_name in columns
+    
+    def _validate_and_fix_template_sql(self, sql_template: str) -> str:
+        """
+        템플릿 SQL을 db_schema 기반으로 검증하고 수정
+        
+        Args:
+            sql_template: 원본 SQL 템플릿
+            
+        Returns:
+            검증/수정된 SQL 템플릿
+        """
+        if not self.db_schema or len(self.db_schema) == 0:
+            return sql_template
+        
+        import re
+        fixed_sql = sql_template
+        
+        # t_member와 t_member_info 관련 자동 수정
+        # t_member_info에 ins_datetime이 있는데 t_member를 사용하는 경우
+        if 't_member' in fixed_sql.lower() and 'ins_datetime' in fixed_sql.lower():
+            # t_fanding을 사용하는 경우는 변경하지 않음
+            if 't_fanding' not in fixed_sql.lower():
+                # t_member_info에 ins_datetime이 있는지 확인
+                if self._has_column('t_member_info', 'ins_datetime'):
+                    # t_member를 t_member_info로 변경 (단, 이미 t_member_info가 있으면 안 함)
+                    if 't_member_info' not in fixed_sql.lower():
+                        fixed_sql = re.sub(r'\bt_member\b', 't_member_info', fixed_sql, flags=re.IGNORECASE)
+                        self.logger.debug("자동 수정: t_member -> t_member_info (ins_datetime 사용)")
+        
+        # 컬럼명 자동 수정
+        # t_member_info에서 member_no를 사용해야 하는데 no를 사용하는 경우
+        if 't_member_info' in fixed_sql.lower():
+            # t_member_info에는 'no'가 없고 'member_no'가 있음
+            if not self._has_column('t_member_info', 'no') and self._has_column('t_member_info', 'member_no'):
+                # m.no 패턴을 m.member_no로 변경 (단, 이미 member_no가 있으면 안 함)
+                fixed_sql = re.sub(r'\bm\.no\b', 'm.member_no', fixed_sql, flags=re.IGNORECASE)
+                self.logger.debug("자동 수정: m.no -> m.member_no (t_member_info 사용)")
+        
+        return fixed_sql
     
     def _get_membership_templates(self) -> Dict[str, SQLTemplate]:
         """멤버십 데이터 분석 템플릿"""
@@ -89,7 +202,7 @@ class FandingSQLTemplates:
                        """,
                        parameters=[],
                        analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
-                       keywords=["활성", "회원", "멤버", "맴버", "활성회원", "활성멤버", "로그인", "최근"]
+                       keywords=["활성", "회원", "멤버", "맴버", "활성회원", "활성멤버", "로그인", "최근", "크리에이터", "creator"]
                    ),
                    "new_members_this_month": SQLTemplate(
                        name="이번 달 신규 회원",
@@ -101,7 +214,7 @@ class FandingSQLTemplates:
                        """,
                        parameters=[],
                        analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
-                       keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", "이번달", "이번"]
+                       keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", "이번달", "이번", "크리에이터", "creator"]
                    ),
                    
                    "new_members_specific_month": SQLTemplate(
@@ -114,7 +227,7 @@ class FandingSQLTemplates:
                        """,
                        parameters=["month"],
                        analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
-                       keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"]
+                       keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월", "크리에이터", "creator"]
                    ),
             
             "monthly_member_trend": SQLTemplate(
@@ -492,8 +605,27 @@ class FandingSQLTemplates:
         }
     
     def get_template(self, template_name: str) -> Optional[SQLTemplate]:
-        """Get SQL template by name"""
-        return self.templates.get(template_name)
+        """
+        Get SQL template by name
+        
+        템플릿을 반환하기 전에 db_schema를 기반으로 SQL을 검증/수정합니다.
+        """
+        template = self.templates.get(template_name)
+        if not template:
+            return None
+        
+        # db_schema 기반으로 SQL 검증 및 자동 수정
+        if self.db_schema and len(self.db_schema) > 0:
+            fixed_sql = self._validate_and_fix_template_sql(template.sql_template)
+            if fixed_sql != template.sql_template:
+                # 수정된 SQL로 새 템플릿 생성
+                from copy import deepcopy
+                fixed_template = deepcopy(template)
+                fixed_template.sql_template = fixed_sql
+                self.logger.debug(f"템플릿 '{template_name}' SQL이 db_schema 기반으로 자동 수정되었습니다")
+                return fixed_template
+        
+        return template
     
     def get_parameterized_template(self, template_name: str, parameters: Dict[str, Any]) -> Optional[SQLTemplate]:
         """Get SQL template with parameters applied"""
@@ -535,6 +667,13 @@ class FandingSQLTemplates:
             
             param_template.sql_template = sql_with_params
             
+            # db_schema 기반으로 SQL 검증 및 자동 수정 (파라미터 적용 후)
+            if self.db_schema and len(self.db_schema) > 0:
+                fixed_sql = self._validate_and_fix_template_sql(sql_with_params)
+                if fixed_sql != sql_with_params:
+                    param_template.sql_template = fixed_sql
+                    self.logger.debug(f"파라미터 적용된 템플릿 '{template_name}' SQL이 db_schema 기반으로 자동 수정되었습니다")
+            
             # name과 description 포맷팅 (month 파라미터 포함)
             name_with_params = template.name
             desc_with_params = template.description
@@ -571,123 +710,73 @@ class FandingSQLTemplates:
         """Get all available templates"""
         return self.templates
     
-    def is_ambiguous_query(self, query: str) -> bool:
-        """애매한 쿼리인지 판단 (개선된 버전)"""
-        query_lower = query.lower()
-        
-        # 애매한 키워드들
-        ambiguous_keywords = [
-            "회원 수", "회원수", "멤버 수", "맴버 수", "사용자 수", "가입자 수",
-            "데이터", "정보", "통계", "분석", "결과", "현황"
-        ]
-        
-        # 구체적인 키워드들 (확장됨)
-        specific_keywords = [
-            # 월 표현 (한국어)
-            "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월",
-            "일월", "이월", "삼월", "사월", "오월", "육월", "칠월", "팔월", "구월", "십월", "십일월", "십이월",
-            # 영어 월 표현
-            "january", "february", "march", "april", "may", "june", "july", "august", 
-            "september", "october", "november", "december",
-            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-            # 상대적 시간 표현
-            "전체", "활성", "신규", "이탈", "월별", "일별", "주별", "년별",
-            "올해", "작년", "지난달", "이번달", "이번주", "지난주", "어제", "오늘", "내일",
-            "last month", "this month", "last year", "this year",
-            # 성과 및 분석 키워드
-            "성과", "실적", "추이", "변화", "증감", "성장률",
-            # Top N 패턴
-            "top5", "top10", "top3", "top1", "top2", "top4", "top6", "top7", "top8", "top9",
-            "상위", "탑", "최고", "인기", "랭킹", "순위", "크리에이터", "creator",
-            # 숫자 패턴
-            "1위", "2위", "3위", "4위", "5위", "6위", "7위", "8위", "9위", "10위",
-            "1등", "2등", "3등", "4등", "5등", "6등", "7등", "8등", "9등", "10등"
-        ]
-        
-        # 애매한 키워드가 있지만 구체적인 키워드가 없는 경우
-        has_ambiguous = any(keyword in query_lower for keyword in ambiguous_keywords)
-        has_specific = any(keyword in query_lower for keyword in specific_keywords)
-        
-        return has_ambiguous and not has_specific
-
-    def generate_clarification_question(self, query: str) -> str:
-        """애매한 쿼리에 대한 구체적인 질문 생성"""
-        query_lower = query.lower()
-        
-        if "회원" in query_lower or "멤버" in query_lower or "맴버" in query_lower:
-            return """🤔 **어떤 회원 수를 원하시나요?**
-
-다음 중에서 선택해주세요:
-
-📊 **기본 회원 수**
-• "전체 회원 수" - 모든 회원 (탈퇴 포함)
-• "활성 회원 수" - 현재 활성 상태인 회원만
-
-📈 **시간별 회원 수**
-• "이번 달 신규 회원" - 10월 신규 가입
-• "8월 신규 회원" - 특정 월 신규 가입
-• "월별 회원 수 추이" - 월별 변화 추이
-
-🎯 **성과 분석**
-• "8월 멤버십 성과" - 월별 멤버십 성과
-• "회원 리텐션 현황" - 회원 유지율 분석
-
-어떤 정보가 필요하신지 말씀해주세요! 😊"""
-        
-        elif "데이터" in query_lower or "정보" in query_lower:
-            return """🤔 **어떤 데이터를 원하시나요?**
-
-다음 중에서 선택해주세요:
-
-👥 **회원 관련**
-• "전체 회원 수", "활성 회원 수"
-• "월별 회원 수 추이", "회원 리텐션"
-
-💰 **성과 관련**  
-• "8월 멤버십 성과", "월간 매출 현황"
-• "크리에이터 성과 분석"
-
-📝 **콘텐츠 관련**
-• "인기 포스트 TOP5", "포스트 참여도 분석"
-
-어떤 데이터가 필요하신지 구체적으로 말씀해주세요! 😊"""
-        
-        else:
-            return """🤔 **더 구체적으로 말씀해주세요!**
-
-다음과 같은 형태로 질문해주시면 정확한 답변을 드릴 수 있습니다:
-
-📊 **회원 관련**
-• "전체 회원 수", "활성 회원 수"
-• "8월 신규 회원", "월별 회원 수 추이"
-
-💰 **성과 관련**
-• "8월 멤버십 성과", "월간 매출 현황"
-
-📝 **콘텐츠 관련**
-• "인기 포스트 TOP5", "포스트 조회수 분석"
-
-어떤 정보가 필요하신지 구체적으로 말씀해주세요! 😊"""
-
     def match_query_to_template(self, query: str) -> Optional[SQLTemplate]:
         """
         자연어 쿼리를 적절한 SQL 템플릿에 매칭 (키워드 기반 점수 매칭)
+        
+        쿼리에서 파라미터(예: 월 정보)를 추출하여 매칭된 템플릿의 파라미터를 자동으로 채웁니다.
+        
+        주의: 크리에이터 키워드가 있는 쿼리는 매칭된 템플릿에 크리에이터 필터가 있는지 확인합니다.
+        크리에이터 필터가 없으면 None을 반환하여 동적 템플릿 생성을 유도합니다.
         
         Args:
             query: 사용자 쿼리
             
         Returns:
-            매칭된 SQLTemplate 또는 None
+            매칭된 SQLTemplate (파라미터 적용됨) 또는 None
         """
         query_lower = query.lower()
         
-        # 파라미터 추출
+        # 크리에이터 정보가 필요한 쿼리인지 확인
+        has_creator_keyword = (
+            '크리에이터' in query_lower or 
+            'creator' in query_lower or
+            any(keyword in query_lower for keyword in ['작가', '아티스트', '제작자'])
+        )
+        
+        # 파라미터 추출 (월 정보 등)
         extracted_params = self._extract_parameters_from_query(query)
+        
+        if extracted_params:
+            self.logger.debug(f"쿼리에서 추출된 파라미터: {extracted_params}")
         
         # 키워드 기반 점수 매칭
         best_template = self._find_best_template_by_keywords(query_lower, extracted_params)
         
+        # 매칭된 템플릿이 있고 파라미터가 있으면 적용
+        if best_template and extracted_params:
+            # 파라미터가 필요한 템플릿인지 확인
+            if best_template.parameters:
+                param_template = self.get_parameterized_template(
+                    self._get_template_name(best_template), 
+                    extracted_params
+                )
+                if param_template:
+                    best_template = param_template
+                    self.logger.info(f"매칭된 템플릿 '{best_template.name}'에 파라미터 적용: {extracted_params}")
+        
+        # 크리에이터 키워드가 있는 경우, 템플릿에 크리에이터 필터가 있는지 확인
+        if best_template and has_creator_keyword:
+            sql_template = best_template.sql_template if hasattr(best_template, 'sql_template') else str(best_template)
+            has_creator_filter = 'creator' in sql_template.lower() or 'creator_no' in sql_template.lower()
+            uses_t_fanding = 't_fanding' in sql_template.lower() or ('f.' in sql_template.lower() and 'FROM t_fanding' in sql_template.upper())
+            
+            if not has_creator_filter and not uses_t_fanding:
+                # 크리에이터 필터가 없고 t_fanding도 사용하지 않으면 템플릿 스킵
+                self.logger.info(
+                    f"템플릿 '{best_template.name}'이 매칭되었지만 크리에이터 필터가 없고 t_fanding을 사용하지 않습니다. "
+                    f"동적 템플릿 생성을 위해 None 반환"
+                )
+                return None
+        
         return best_template
+    
+    def _get_template_name(self, template: SQLTemplate) -> str:
+        """템플릿 객체에서 템플릿 이름 찾기 (키 조회용)"""
+        for name, tpl in self.templates.items():
+            if tpl == template or (hasattr(tpl, 'name') and tpl.name == template.name):
+                return name
+        return ""
     
     def _find_best_template_by_keywords(self, query_lower: str, extracted_params: Dict[str, Any]) -> Optional[SQLTemplate]:
         """
@@ -723,10 +812,20 @@ class FandingSQLTemplates:
         if best_score >= 0.3:  # 30% 이상 매칭
             self.logger.debug(f"키워드 매칭: '{best_name}' (점수: {best_score:.2f})")
             
-            # 파라미터가 있으면 적용
-            if extracted_params:
-                return self.get_parameterized_template(best_name, extracted_params)
-        else:
+            # 파라미터가 있으면 적용 (매칭된 템플릿의 파라미터를 동적으로 채움)
+            if extracted_params and best_template.parameters:
+                param_template = self.get_parameterized_template(best_name, extracted_params)
+                # get_parameterized_template 내부에서 이미 db_schema 기반 검증/수정이 수행됨
+                if param_template:
+                    self.logger.debug(f"템플릿 '{best_name}' 파라미터 적용 완료: {extracted_params}")
+                    return param_template
+                else:
+                    # 파라미터 적용 실패 시 원본 템플릿 반환
+                    self.logger.warning(f"템플릿 '{best_name}' 파라미터 적용 실패, 원본 템플릿 반환")
+                    return best_template
+            else:
+                # 파라미터가 없거나 템플릿에 파라미터가 필요 없으면 원본 템플릿 반환
+                # db_schema 기반 검증/수정은 match_query_to_template에서 처리됨
                 return best_template
         
         return None
@@ -880,7 +979,10 @@ class FandingSQLTemplates:
     
     def create_dynamic_monthly_template(self, query: str) -> Optional[SQLTemplate]:
         """
-        동적으로 월별 멤버십 성과 템플릿 생성 (개선된 날짜 처리)
+        동적으로 월별 템플릿 생성 (매칭된 템플릿이 없을 때만 사용)
+        
+        주의: 이 메서드는 match_query_to_template에서 템플릿이 매칭되지 않았을 때만 호출되어야 합니다.
+        매칭된 템플릿이 있으면 그 템플릿의 파라미터를 동적으로 채우는 것이 우선입니다.
         
         Args:
             query: 사용자 쿼리
@@ -895,6 +997,22 @@ class FandingSQLTemplates:
             month_info = DateUtils.extract_month_with_year_from_query(query)
             if not month_info:
                 return None
+            
+            # 쿼리 의도 분석: 신규 회원수 vs 멤버십 성과 분석
+            query_lower = query.lower()
+            has_new_member_keywords = any(keyword in query_lower for keyword in [
+                '신규', '새로운', '가입', 'new', '신규회원', '신규멤버', '회원수', '회원 수'
+            ])
+            has_membership_performance_keywords = any(keyword in query_lower for keyword in [
+                '멤버십', '맴버쉽', '성과', '실적', 'performance', 'membership', '분석'
+            ])
+            
+            # 크리에이터 정보가 필요한 쿼리인지 확인 (중요: 크리에이터 필터가 필요하면 t_fanding 사용)
+            has_creator_keyword = (
+                '크리에이터' in query_lower or 
+                'creator' in query_lower or
+                any(keyword in query_lower for keyword in ['작가', '아티스트', '제작자'])
+            )
                 
             year, month = month_info
             
@@ -904,30 +1022,150 @@ class FandingSQLTemplates:
             # 정확한 YYYY-MM 형식 생성
             yyyy_mm = f"{year}-{month_num}"
             
-            # 동적 SQL 템플릿 생성 (개선된 날짜 필터링)
-            sql_template = f"""
+            # db_schema에서 실제 테이블과 컬럼 정보 확인
+            if not self.db_schema or len(self.db_schema) == 0:
+                self.logger.warning("db_schema가 비어있어 동적 템플릿 생성 실패")
+                return None
+            
+            # t_fanding 테이블 확인
+            if 't_fanding' not in self.db_schema:
+                self.logger.warning("t_fanding 테이블이 db_schema에 없어 동적 템플릿 생성 실패")
+                return None
+            
+            fanding_schema = self.db_schema['t_fanding']
+            fanding_columns = fanding_schema.get('columns', {})
+            
+            # 필요한 컬럼 확인
+            if 'member_no' not in fanding_columns or 'ins_datetime' not in fanding_columns:
+                self.logger.warning("t_fanding에 필요한 컬럼(member_no, ins_datetime)이 없어 동적 템플릿 생성 실패")
+                return None
+            
+            # t_member 테이블 확인 (JOIN용)
+            member_table = None
+            member_pk = None
+            member_status_col = None
+            
+            if 't_member' in self.db_schema:
+                member_table = 't_member'
+                member_schema = self.db_schema['t_member']
+                member_columns = member_schema.get('columns', {})
+                # t_member의 PK 찾기 (일반적으로 'no')
+                for col_name in ['no', 'id', 'member_no']:
+                    if col_name in member_columns:
+                        member_pk = col_name
+                        break
+                # status 컬럼 확인
+                if 'status' in member_columns:
+                    member_status_col = 'status'
+            elif 't_member_info' in self.db_schema:
+                member_table = 't_member_info'
+                member_schema = self.db_schema['t_member_info']
+                member_columns = member_schema.get('columns', {})
+                # t_member_info의 PK 찾기
+                for col_name in ['member_no', 'no', 'id']:
+                    if col_name in member_columns:
+                        member_pk = col_name
+                        break
+                # status 컬럼 확인
+                if 'status' in member_columns:
+                    member_status_col = 'status'
+            
+            if not member_table or not member_pk:
+                self.logger.warning("t_member 또는 t_member_info 테이블을 찾을 수 없어 동적 템플릿 생성 실패")
+                return None
+            
+            # JOIN 조건 구성 (동적)
+            join_condition = f"f.member_no = m.{member_pk}"
+            
+            # 쿼리 의도에 따라 다른 템플릿 생성
+            if has_new_member_keywords and not has_membership_performance_keywords:
+                # 신규 회원수 템플릿 생성
+                # 크리에이터 필터가 필요한 경우 t_fanding 사용 (creator_no 컬럼 필요)
+                if has_creator_keyword:
+                    # 크리에이터 필터가 필요한 경우: t_fanding 사용 (creator_no 컬럼 포함)
+                    if 't_fanding' in self.db_schema and self._has_column('t_fanding', 'ins_datetime') and self._has_column('t_fanding', 'creator_no'):
+                        # t_fanding 사용 (멤버십 가입 기준, 크리에이터 필터 가능)
+                        sql_template = f"""
+            SELECT COUNT(DISTINCT f.member_no) as new_members_{month_num}month 
+            FROM t_fanding f
+            WHERE DATE_FORMAT(f.ins_datetime, '%Y-%m') = '{yyyy_mm}'
+            """
+                        self.logger.info(f"크리에이터 필터가 필요한 쿼리로 t_fanding 테이블 사용 (creator_no 필터는 SQLGenerationNode에서 추가됨)")
+                    else:
+                        self.logger.warning("크리에이터 필터가 필요한데 t_fanding 테이블 또는 creator_no 컬럼이 없습니다")
+                        return None
+                else:
+                    # 크리에이터 필터가 필요 없는 경우: t_member_info 또는 t_fanding 사용
+                    if 't_member_info' in self.db_schema and self._has_column('t_member_info', 'ins_datetime'):
+                        # t_member_info 사용 (더 정확한 신규 회원수)
+                        sql_template = f"""
+            SELECT COUNT(*) as new_members_{month_num}month 
+            FROM t_member_info 
+            WHERE DATE_FORMAT(ins_datetime, '%Y-%m') = '{yyyy_mm}'
+            """
+                    elif 't_fanding' in self.db_schema and self._has_column('t_fanding', 'ins_datetime'):
+                        # t_fanding 사용 (멤버십 가입 기준)
+                        sql_template = f"""
+            SELECT COUNT(DISTINCT f.member_no) as new_members_{month_num}month 
+            FROM t_fanding f
+            WHERE DATE_FORMAT(f.ins_datetime, '%Y-%m') = '{yyyy_mm}'
+            """
+                    else:
+                        # fallback: t_fanding 사용
+                        sql_template = f"""
+            SELECT COUNT(DISTINCT f.member_no) as new_members_{month_num}month 
+            FROM t_fanding f
+            WHERE DATE_FORMAT(f.ins_datetime, '%Y-%m') = '{yyyy_mm}'
+            """
+                
+                self.logger.info(f"동적 신규 회원 템플릿 생성 완료: {month_num}월")
+                return SQLTemplate(
+                    name=f"{month_num}월 신규 회원",
+                    description=f"{month_num}월 신규 가입 회원 수 ({year}년 데이터, db_schema 기반 동적 생성)",
+                    sql_template=sql_template,
+                    parameters=[],
+                    analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                    keywords=["신규", "회원", "멤버", "맴버", "신규회원", "신규멤버", "가입", "현황", f"{month}월", f"{month_num}월"]
+                )
+            else:
+                # 멤버십 성과 분석 템플릿 생성 (기본값)
+                # status 컬럼이 있으면 status 기반 집계, 없으면 기본 집계만
+                if member_status_col:
+                    sql_template = f"""
             SELECT 
                 '{month_num}월' as analysis_month,
-                COUNT(DISTINCT m.no) as total_members,
-                COUNT(DISTINCT CASE WHEN m.status = 'A' THEN m.no END) as active_members,
-                COUNT(DISTINCT CASE WHEN m.status = 'I' THEN m.no END) as inactive_members,
-                COUNT(DISTINCT CASE WHEN m.status = 'D' THEN m.no END) as deleted_members,
-                ROUND(COUNT(DISTINCT CASE WHEN m.status = 'A' THEN m.no END) * 100.0 / COUNT(DISTINCT m.no), 2) as active_rate_percent,
-                ROUND(COUNT(DISTINCT CASE WHEN m.status = 'I' THEN m.no END) * 100.0 / COUNT(DISTINCT m.no), 2) as inactive_rate_percent,
-                ROUND(COUNT(DISTINCT CASE WHEN m.status = 'D' THEN m.no END) * 100.0 / COUNT(DISTINCT m.no), 2) as deletion_rate_percent
-            FROM t_member m
-            LEFT JOIN t_member_login_log l ON m.no = l.member_no
-            WHERE DATE_FORMAT(l.ins_datetime, '%Y-%m') = '{yyyy_mm}'
+                COUNT(DISTINCT f.member_no) as total_members,
+                COUNT(DISTINCT CASE WHEN m.{member_status_col} = 'A' THEN f.member_no END) as active_members,
+                COUNT(DISTINCT CASE WHEN m.{member_status_col} = 'I' THEN f.member_no END) as inactive_members,
+                COUNT(DISTINCT CASE WHEN m.{member_status_col} = 'D' THEN f.member_no END) as deleted_members,
+                ROUND(COUNT(DISTINCT CASE WHEN m.{member_status_col} = 'A' THEN f.member_no END) * 100.0 / COUNT(DISTINCT f.member_no), 2) as active_rate_percent,
+                ROUND(COUNT(DISTINCT CASE WHEN m.{member_status_col} = 'I' THEN f.member_no END) * 100.0 / COUNT(DISTINCT f.member_no), 2) as inactive_rate_percent,
+                ROUND(COUNT(DISTINCT CASE WHEN m.{member_status_col} = 'D' THEN f.member_no END) * 100.0 / COUNT(DISTINCT f.member_no), 2) as deletion_rate_percent
+            FROM t_fanding f
+            INNER JOIN {member_table} m ON {join_condition}
+            WHERE DATE_FORMAT(f.ins_datetime, '%Y-%m') = '{yyyy_mm}'
             """
-            
-            return SQLTemplate(
-                name=f"{month_num}월 멤버십 성과 분석",
-                description=f"{month_num}월 멤버십 성과 상세 분석 ({year}년 데이터)",
-                sql_template=sql_template,
-                parameters=[],
-                analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
-                keywords=["멤버십", "맴버쉽", "성과", "실적", "분석", f"{month}월", f"{month_num}월"]
-            )
+                else:
+                    # status 컬럼이 없으면 기본 집계만
+                    sql_template = f"""
+            SELECT 
+                '{month_num}월' as analysis_month,
+                COUNT(DISTINCT f.member_no) as total_members
+            FROM t_fanding f
+            INNER JOIN {member_table} m ON {join_condition}
+            WHERE DATE_FORMAT(f.ins_datetime, '%Y-%m') = '{yyyy_mm}'
+            """
+                
+                self.logger.info(f"동적 멤버십 성과 템플릿 생성 완료: {member_table} 사용, PK={member_pk}, status_col={member_status_col}")
+                
+                return SQLTemplate(
+                    name=f"{month_num}월 멤버십 성과 분석",
+                    description=f"{month_num}월 멤버십 성과 상세 분석 ({year}년 데이터, db_schema 기반 동적 생성)",
+                    sql_template=sql_template,
+                    parameters=[],
+                    analysis_type=FandingAnalysisType.MEMBERSHIP_DATA,
+                    keywords=["멤버십", "맴버쉽", "성과", "실적", "분석", f"{month}월", f"{month_num}월"]
+                )
         except Exception as e:
             self.logger.error(f"동적 월별 템플릿 생성 실패: {str(e)}")
             return None
@@ -1071,27 +1309,68 @@ class FandingSQLTemplates:
                 params['months'] = int(match.group(1))
                 break
         
-        # 단일 월 파라미터 추출 (예: "9월", "9월 신규 회원")
-        single_month_pattern = r'(\d+)\s*월'
-        month_match = re.search(single_month_pattern, query_lower)
-        if month_match:
-            month_num = int(month_match.group(1))
-            if 1 <= month_num <= 12:
-                params['month'] = month_num
+        # 단일 월 파라미터 추출 (예: "9월", "9월 신규 회원", "10월 신규 회원수")
+        # 다양한 패턴 지원: "10월", "10월달", "10월분", "10월 신규", "10월의" 등
+        single_month_patterns = [
+            r'(\d+)\s*월\s*(?:달|분|의|에|로|으로|에서)?',  # "10월", "10월달", "10월의" 등
+            r'(\d+)\s*월달',  # "10월달"
+            r'(\d+)\s*월분',  # "10월분"
+        ]
+        
+        for pattern in single_month_patterns:
+            month_match = re.search(pattern, query_lower)
+            if month_match:
+                month_num = int(month_match.group(1))
+                if 1 <= month_num <= 12:
+                    params['month'] = month_num
+                    self.logger.debug(f"쿼리에서 월 파라미터 추출: {month_num}월")
+                    break  # 첫 번째 매칭만 사용
         
         return params
 
+    def _check_if_fallback_schema(self) -> bool:
+        """
+        현재 스키마가 fallback 스키마인지 확인
+        
+        Returns:
+            bool: fallback 스키마이면 True
+        """
+        # fallback 스키마는 일반적으로 제한된 테이블만 포함
+        # 실제 DB 스키마는 더 많은 테이블을 포함할 것으로 예상
+        fallback_tables = {"t_member", "t_creator", "t_funding"}
+        current_tables = set(self.db_schema.keys())
+        
+        # fallback 테이블과 정확히 일치하거나, 매우 적은 테이블만 있으면 fallback으로 간주
+        if len(current_tables) <= 3 and current_tables.issubset(fallback_tables):
+            return True
+        
+        # 또는 실제 DB에서 로드된 테이블이 매우 적으면 (DB 연결 실패 가능성)
+        if len(current_tables) <= 5:
+            self.logger.warning(f"스키마에 테이블이 {len(current_tables)}개만 있습니다. DB 연결 실패 가능성이 있습니다.")
+            return True
+        
+        return False
+    
     def _validate_templates(self) -> None:
         """
         템플릿과 실제 DB 스키마 간의 동기화 검증
         
         모든 템플릿의 SQL에서 사용된 테이블과 컬럼명이 실제 DB 스키마에 존재하는지 확인합니다.
         존재하지 않는 테이블/컬럼이 발견되면 심각한 오류 로그를 기록합니다.
+        단, fallback 스키마일 때는 경고로 처리합니다.
         """
         validation_errors = []
         validation_warnings = []
         
         self.logger.info("템플릿 스키마 검증을 시작합니다...")
+        
+        # fallback 스키마일 때는 검증을 건너뛰고 경고만 표시
+        if self._is_fallback_schema:
+            self.logger.warning(
+                f"⚠️  스키마가 fallback 모드입니다 (DB 연결 실패 가능성). "
+                f"템플릿 검증을 건너뜁니다. 현재 스키마 테이블 수: {len(self.db_schema)}"
+            )
+            return
         
         for template_name, template in self.templates.items():
             try:
@@ -1137,10 +1416,22 @@ class FandingSQLTemplates:
         
         # 검증 결과 요약
         if validation_errors:
-            self.logger.error(f"템플릿 검증 실패: {len(validation_errors)}개 오류 발견")
-            self.logger.error("발견된 오류들:")
-            for error in validation_errors:
-                self.logger.error(f"  - {error}")
+
+            # fallback 스키마가 아닌 경우에만 오류로 처리
+            if self._is_fallback_schema:
+                # fallback 스키마일 때는 경고로만 표시
+                self.logger.warning(
+                    f"템플릿 검증 경고 (fallback 스키마): {len(validation_errors)}개 템플릿이 현재 스키마와 일치하지 않습니다. "
+                    f"DB 연결이 정상화되면 자동으로 해결됩니다."
+                )
+            else:
+                # 실제 스키마일 때는 오류로 표시
+                self.logger.error(f"템플릿 검증 실패: {len(validation_errors)}개 오류 발견")
+                self.logger.error("발견된 오류들:")
+                for error in validation_errors[:10]:  # 처음 10개만 표시 (너무 많으면 로그가 과도함)
+                    self.logger.error(f"  - {error}")
+                if len(validation_errors) > 10:
+                    self.logger.error(f"  ... 외 {len(validation_errors) - 10}개 오류 더 있음")
         else:
             self.logger.info(f"템플릿 검증 성공: {len(self.templates)}개 템플릿 모두 유효")
         

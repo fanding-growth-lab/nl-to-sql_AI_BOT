@@ -92,7 +92,7 @@ class InteractiveHandler(BaseSlackHandler):
                         thread_ts=thread_ts,
                         text=error_msg
                     )
-                    logger.error(f"SQL regeneration error: {str(e)}", exc_info=True)
+                    logger.error(f"SQL regeneration error: {str(e)}")
             else:
                 await client.chat_postMessage(
                     channel=channel_id,
@@ -101,7 +101,7 @@ class InteractiveHandler(BaseSlackHandler):
                 )
                 
         except Exception as e:
-            logger.error(f"Regenerate SQL handler error: {str(e)}", exc_info=True)
+            logger.error(f"Regenerate SQL handler error: {str(e)}")
     
     async def handle_explain_sql(self, ack: callable, body: Dict[str, Any], client):
         """
@@ -150,7 +150,7 @@ class InteractiveHandler(BaseSlackHandler):
             )
             
         except Exception as e:
-            logger.error(f"Explain SQL handler error: {str(e)}", exc_info=True)
+            logger.error(f"Explain SQL handler error: {str(e)}")
     
     async def handle_show_schema(self, ack: callable, body: Dict[str, Any], client):
         """
@@ -188,7 +188,7 @@ class InteractiveHandler(BaseSlackHandler):
             )
             
         except Exception as e:
-            logger.error(f"Show schema handler error: {str(e)}", exc_info=True)
+            logger.error(f"Show schema handler error: {str(e)}")
     
     async def handle_query_modal(self, ack: callable, body: Dict[str, Any], client):
         """
@@ -237,7 +237,7 @@ class InteractiveHandler(BaseSlackHandler):
                     )
                     
         except Exception as e:
-            logger.error(f"Query modal handler error: {str(e)}", exc_info=True)
+            logger.error(f"Query modal handler error: {str(e)}")
     
     async def handle_query_shortcut(self, ack: callable, body: Dict[str, Any], client):
         """
@@ -261,7 +261,7 @@ class InteractiveHandler(BaseSlackHandler):
             )
             
         except Exception as e:
-            logger.error(f"Query shortcut handler error: {str(e)}", exc_info=True)
+            logger.error(f"Query shortcut handler error: {str(e)}")
     
     def _extract_query_from_context(self, body: Dict[str, Any]) -> Optional[str]:
         """Extract original query from interactive component context."""

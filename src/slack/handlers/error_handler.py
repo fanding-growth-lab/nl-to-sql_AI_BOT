@@ -48,18 +48,11 @@ class SlackErrorHandler:
             logger: Logger instance
         """
         try:
-            # Log the error with context
             self._log_error(error, body)
-            
-            # Determine error type and appropriate response
             error_response = self._get_error_response(error, body)
-            
-            # Send error response to user if possible
             self._send_error_response(error_response, body)
-            
-        except Exception as e:
-            # If error handling itself fails, log it
-            logger.error(f"Error in error handler: {str(e)}", exc_info=True)
+        except Exception:
+            pass
     
     def error_logging_middleware(self, args, next):
         """
@@ -70,39 +63,18 @@ class SlackErrorHandler:
             next: Next middleware function
         """
         try:
-            # Execute the next middleware/handler
             return next()
         except Exception as e:
-            # Log the error
             self._log_middleware_error(e, args)
             raise
     
     def _log_error(self, error: Exception, body: Dict[str, Any]):
         """Log error with detailed context."""
-        error_context = {
-            "error_type": type(error).__name__,
-            "error_message": str(error),
-            "event_type": body.get("type", "unknown"),
-            "channel": body.get("channel", {}).get("id", "unknown"),
-            "user": body.get("user", {}).get("id", "unknown"),
-            "timestamp": body.get("event_ts", "unknown")
-        }
-        
-        logger.error(
-            f"Slack event processing error: {error_context['error_type']}",
-            **error_context,
-            exc_info=True
-        )
-        
-        # Log stack trace for debugging
-        logger.debug(f"Error stack trace: {traceback.format_exc()}")
+        logger.error(f"Slack event processing error: {type(error).__name__} - {str(error)}")
     
     def _log_middleware_error(self, error: Exception, args):
         """Log middleware errors."""
-        logger.error(
-            f"Middleware error: {type(error).__name__} - {str(error)}",
-            exc_info=True
-        )
+        logger.error(f"Middleware error: {type(error).__name__} - {str(error)}")
     
     def _get_error_response(self, error: Exception, body: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -184,8 +156,8 @@ class SlackErrorHandler:
                     user_message=error_response["user_message"]
                 )
         
-        except Exception as e:
-            logger.error(f"Failed to send error response: {str(e)}")
+        except Exception:
+            pass
     
     def _get_error_response_channel(self, body: Dict[str, Any]) -> Optional[str]:
         """Determine the appropriate channel to send error response."""
@@ -282,6 +254,8 @@ class SlackErrorHandler:
         """Reset error statistics."""
         # This would typically reset metrics in a monitoring system
         logger.info("Error statistics reset")
+
+
 
 
 

@@ -13,9 +13,11 @@ from datetime import datetime
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
+from langchain.output_parsers.json import SimpleJsonOutputParser
 
 from .nodes import BaseNode
 from agentic_flow.llm_service import get_llm_service
+from agentic_flow.llm_output_parser import parse_json_response
 from agentic_flow.state import GraphState
 # Removed: from .date_utils import DateUtils (deleted module)
 
@@ -36,6 +38,7 @@ class DynamicSQLGenerator(BaseNode):
         super().__init__(config)
         self.llm_service = get_llm_service()
         self.llm = self.llm_service.get_sql_llm()
+        self.json_parser = SimpleJsonOutputParser()
         self._setup_prompt()
     
     def _initialize_llm(self) -> Optional[ChatGoogleGenerativeAI]:
@@ -95,79 +98,21 @@ JSON 형식으로만 응답:
             self.logger.info(f"LLM Model: {self.config.get('llm', {}).get('model', 'unknown')}")
             
             try:
-                response = self.llm.invoke(formatted_prompt)
+                # LangChain 메시지 형식으로 변환 (문자열을 HumanMessage로)
+                from langchain_core.messages import HumanMessage
+                messages = [HumanMessage(content=formatted_prompt)]
+                response = self.llm.invoke(messages)
                 self.logger.info(f"LLM invoke completed successfully")
             except Exception as e:
                 self.logger.error(f"LLM invoke failed: {str(e)}")
                 return None
             
-            # 응답 내용 확인
             if not response:
                 self.logger.error("LLM returned None response")
                 return None
-                
-            if not hasattr(response, 'content'):
-                self.logger.error("LLM response has no content attribute")
-                # 후보/메타 내 텍스트 추출 시도
-                alt_text = None
-                try:
-                    alt_text = getattr(response, 'additional_kwargs', {}).get('text') or getattr(response, 'response_metadata', {}).get('text')
-                except Exception:
-                    pass
-                if alt_text:
-                    self.logger.info("Using alternative text from response metadata")
-                    response_content = alt_text
-                else:
-                    return None
-                
-            else:
-                response_content_raw = response.content
-                # Handle different response types
-                if isinstance(response_content_raw, str):
-                    response_content = response_content_raw
-                elif isinstance(response_content_raw, list):
-                    # Extract text from list of content blocks
-                    response_content = " ".join(str(item) for item in response_content_raw)
-                else:
-                    response_content = str(response_content_raw)
-                
-            if not response_content:
-                # 후보/메타 내 텍스트 재시도
-                alt_text = None
-                try:
-                    alt_text = getattr(response, 'additional_kwargs', {}).get('text') or getattr(response, 'response_metadata', {}).get('text')
-                except Exception:
-                    pass
-                if not alt_text:
-                    self.logger.warning("LLM returned empty content - may be due to ambiguous query requiring clarification")
-                    return None
-                self.logger.info("Using alternative text from response metadata (empty content)")
-                response_content = alt_text
             
-            # Log response content safely
-            response_content_str = str(response_content) if response_content else ""
-            self.logger.info(f"LLM Response length: {len(response_content_str)}")
-            self.logger.info(f"LLM Response content: {response_content_str[:200]}...")
-            self.logger.info(f"Full LLM Response: {repr(response_content_str)}")
-            
-            # JSON 파싱 (디버깅 추가)
-            try:
-                # 응답 내용 정리
-                cleaned_content = response_content_str.strip()
-                self.logger.info(f"Cleaned content: {cleaned_content[:200]}...")
-                
-                result_data = json.loads(cleaned_content)
-            except json.JSONDecodeError as e:
-                # JSON 파싱 실패 시 텍스트에서 추출
-                result_data = self._extract_json_from_text(response_content_str)
-                self.logger.info(f"Extracted from text: {result_data}")
-            except Exception as e:
-                self.logger.error(f"Unexpected error in JSON parsing: {str(e)}")
-                self.logger.error(f"Response content: {response_content_str}")
-                self.logger.error(f"Response content repr: {repr(response_content_str)}")
-                # 예상치 못한 에러 시 텍스트에서 추출
-                result_data = self._extract_json_from_text(response_content_str)
-                self.logger.info(f"Extracted from text: {result_data}")
+            # LangChain 표준 Output Parser 사용
+            result_data = parse_json_response(response, parser=self.json_parser, fallback_extract=True)
             
             if not result_data:
                 self.logger.warning("No valid data extracted from LLM response")
@@ -209,7 +154,9 @@ JSON 형식으로만 응답:
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
-    def _extract_json_from_text(self, text: str) -> Optional[Dict[str, Any]]:
+    # Note: JSON 파싱 로직은 llm_output_parser 모듈로 이동됨
+    # parse_json_response 함수를 사용하세요
+    def _extract_json_from_text_deprecated(self, text: str) -> Optional[Dict[str, Any]]:
         """텍스트에서 JSON 추출 (개선된 버전)"""
         try:
             import json
@@ -251,18 +198,28 @@ JSON 형식으로만 응답:
             return self._create_fallback_json(text)
     
     def _extract_json_by_blocks(self, text: str) -> Optional[Dict[str, Any]]:
-        """JSON 블록으로 추출"""
+        """JSON 블록으로 추출 (개선된 버전)"""
         import json
+        import re
         
         try:
-            # JSON 블록 찾기
+            # 먼저 ```json ... ``` 블록에서 추출 시도
+            json_block_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
+            match = re.search(json_block_pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                json_str = match.group(1).strip()
+                # JSON 문자열 내의 개행 정리
+                json_str = re.sub(r'\n\s*', ' ', json_str)
+                return json.loads(json_str)
+            
+            # ```json 블록이 없으면 일반 JSON 객체 찾기
             start_idx = text.find('{')
             end_idx = text.rfind('}')
             
             if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
                 json_str = text[start_idx:end_idx+1]
-                # 문자열 정리
-                json_str = json_str.strip()
+                # JSON 문자열 정리 (개행 정리)
+                json_str = re.sub(r'\n\s*', ' ', json_str.strip())
                 return json.loads(json_str)
         except Exception as e:
             self.logger.debug(f"JSON 블록 추출 실패: {str(e)}")
@@ -444,15 +401,36 @@ JSON 형식으로만 응답:
             # 동적 SQL 생성
             result = self.generate_dynamic_sql(user_query)
             
-            if result:
+            if result and result.sql_query:
                 # 결과를 state에 저장 (GraphState는 TypedDict이므로 dict로 캐스팅)
                 state_dict: Dict[str, Any] = state  # type: ignore[assignment]
+                
+                # dynamic_sql_result에 상세 정보 저장
                 state_dict["dynamic_sql_result"] = {
                     "sql_query": result.sql_query,
                     "confidence": result.confidence,
                     "reasoning": result.reasoning,
                     "extracted_params": result.extracted_params
                 }
+                
+                # SQL이 성공적으로 생성되었으므로 clarification 응답 제거
+                # 이전에 NLProcessor에서 설정한 clarification이 있어도 SQL 생성이 성공했으면 무시
+                if state_dict.get("conversation_response") and state_dict.get("needs_clarification"):
+                    self.logger.info(
+                        f"SQL successfully generated (confidence: {result.confidence:.2f}), "
+                        f"clearing clarification response to proceed with SQL execution"
+                    )
+                    state_dict["conversation_response"] = None
+                    state_dict["needs_clarification"] = False
+                
+                # sql_query에도 저장하여 SQLGenerationNode에서 사용 가능하도록 함
+                # 단, 기존 sql_query가 템플릿 SQL이고 dynamic_sql의 confidence가 높으면 덮어쓰기
+                existing_sql = state_dict.get("sql_query")
+                if not existing_sql or (existing_sql and result.confidence >= 0.8):
+                    state_dict["sql_query"] = result.sql_query
+                    self.logger.info(f"Dynamic SQL saved to state['sql_query'] with confidence: {result.confidence:.2f}")
+                else:
+                    self.logger.info(f"Keeping existing SQL (template) as DynamicSQL confidence ({result.confidence:.2f}) is lower")
                 
                 self.logger.info(f"Dynamic SQL generated with confidence: {result.confidence:.2f}")
                 self.logger.debug(f"Generated SQL: {result.sql_query}")

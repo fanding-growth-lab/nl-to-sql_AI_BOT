@@ -853,11 +853,41 @@ class LearningDataIntegrator:
     
     StatisticsCollector와 AutoLearningSystem 간 데이터 공유 및
     통합 쿼리 상호작용 메트릭스를 관리합니다.
+    
+    기능:
+    - 실시간 처리 모드: 개별 쿼리 결과 즉시 처리
+    - 배치 처리 모드: 지정된 간격으로 다수의 쿼리 결과 일괄 처리
+    - 데이터 변환 및 필터링: 통계 데이터를 학습 시스템에 적합한 형식으로 변환
     """
     
-    def __init__(self):
+    def __init__(self, processing_mode: str = "realtime", batch_size: int = 10, batch_interval_seconds: float = 60.0):
+        """
+        LearningDataIntegrator 초기화
+        
+        Args:
+            processing_mode: 처리 모드 ("realtime" 또는 "batch")
+            batch_size: 배치 모드에서 일괄 처리할 최대 쿼리 수
+            batch_interval_seconds: 배치 모드에서 처리 간격 (초)
+        """
         self.logger = logging.getLogger(__name__)
         self.stats_collector = get_stats_collector()
+        
+        # 처리 모드 설정
+        self.processing_mode = processing_mode.lower()
+        if self.processing_mode not in ["realtime", "batch"]:
+            self.logger.warning(f"Invalid processing_mode '{processing_mode}', defaulting to 'realtime'")
+            self.processing_mode = "realtime"
+        
+        self.batch_size = batch_size
+        self.batch_interval_seconds = batch_interval_seconds
+        
+        # 배치 처리용 큐 및 스레드
+        self._batch_queue: queue.Queue = queue.Queue()
+        self._batch_processing_thread: Optional[threading.Thread] = None
+        self._batch_processing_active = False
+        
+        if self.processing_mode == "batch":
+            self._start_batch_processing()
         
         # AutoLearningSystem은 필요할 때 lazy initialization
         self._auto_learning_system: Optional[Any] = None
@@ -875,22 +905,62 @@ class LearningDataIntegrator:
                 return None
         return self._auto_learning_system
     
-    def record_complete_query_interaction(self, metrics: QueryInteractionMetrics) -> None:
-        """
-        전체 쿼리 상호작용 기록 (통합)
+    def _start_batch_processing(self) -> None:
+        """배치 처리 스레드 시작"""
+        if self._batch_processing_active:
+            return
         
-        Args:
-            metrics: 통합 쿼리 상호작용 메트릭스
-        """
+        self._batch_processing_active = True
+        self._batch_processing_thread = threading.Thread(
+            target=self._batch_processing_worker,
+            daemon=True,
+            name="LearningDataIntegrator-BatchProcessor"
+        )
+        self._batch_processing_thread.start()
+        self.logger.info(f"Started batch processing (interval={self.batch_interval_seconds}s, size={self.batch_size})")
+    
+    def _stop_batch_processing(self) -> None:
+        """배치 처리 스레드 중지"""
+        self._batch_processing_active = False
+        if self._batch_processing_thread and self._batch_processing_thread.is_alive():
+            self._batch_processing_thread.join(timeout=5.0)
+            self.logger.info("Stopped batch processing")
+    
+    def _batch_processing_worker(self) -> None:
+        """배치 처리 워커 스레드"""
+        while self._batch_processing_active:
+            try:
+                time.sleep(self.batch_interval_seconds)
+                
+                # 큐에서 배치 단위로 메트릭 수집
+                batch_metrics = []
+                while len(batch_metrics) < self.batch_size:
+                    try:
+                        metric = self._batch_queue.get_nowait()
+                        batch_metrics.append(metric)
+                    except queue.Empty:
+                        break
+                
+                # 배치 처리 수행
+                if batch_metrics:
+                    self.logger.debug(f"Processing batch of {len(batch_metrics)} metrics")
+                    self._process_batch(batch_metrics)
+                    
+            except Exception as e:
+                self.logger.error(f"Error in batch processing worker: {e}")
+    
+    def _process_batch(self, metrics_list: List[QueryInteractionMetrics]) -> None:
+        """배치 메트릭 처리"""
+        try:
+            for metrics in metrics_list:
+                self._process_single_interaction(metrics)
+        except Exception as e:
+            self.logger.error(f"Failed to process batch: {e}")
+    
+    def _process_single_interaction(self, metrics: QueryInteractionMetrics) -> None:
+        """단일 쿼리 상호작용 처리 (내부 메서드)"""
         try:
             # 1. StatisticsCollector에 Intent 분류 데이터 기록
-            classification_metrics = ClassificationMetrics(
-                intent=metrics.intent,
-                confidence=metrics.intent_confidence,
-                response_time_ms=metrics.response_time_ms,
-                timestamp=metrics.timestamp,
-                is_error=metrics.is_error
-            )
             self.stats_collector.record_classification(
                 intent=metrics.intent,
                 confidence=metrics.intent_confidence,
@@ -902,19 +972,262 @@ class LearningDataIntegrator:
             if self.auto_learning_system:
                 success = metrics.execution_success and metrics.validation_passed
                 
+                # 데이터 변환: 통계 데이터를 학습 시스템 형식으로 변환
+                learning_data = self._convert_to_learning_format(metrics)
+                
                 self.auto_learning_system.record_query_interaction(
                     user_id=metrics.user_id or "unknown",
                     query=metrics.user_query,
-                    mapping_result=metrics.mapping_result or {},
+                    mapping_result=learning_data.get("mapping_result", metrics.mapping_result or {}),
                     confidence=metrics.intent_confidence,
                     success=success,
                     user_feedback=metrics.user_feedback
                 )
                 
-                self.logger.debug(f"Recorded query interaction: {metrics.user_query[:50]}...")
+                self.logger.debug(f"Processed query interaction: {metrics.user_query[:50]}...")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to process single interaction: {e}")
+    
+    def record_complete_query_interaction(self, metrics: QueryInteractionMetrics) -> None:
+        """
+        전체 쿼리 상호작용 기록 (통합)
+        
+        처리 모드에 따라:
+        - 실시간 모드: 즉시 처리
+        - 배치 모드: 큐에 추가 후 배치 처리
+        
+        Args:
+            metrics: 통합 쿼리 상호작용 메트릭스
+        """
+        try:
+            if self.processing_mode == "realtime":
+                # 실시간 처리: 즉시 처리
+                self._process_single_interaction(metrics)
+            elif self.processing_mode == "batch":
+                # 배치 처리: 큐에 추가
+                self._batch_queue.put(metrics)
+                self.logger.debug(f"Added metric to batch queue (queue size: {self._batch_queue.qsize()})")
+            else:
+                self.logger.warning(f"Unknown processing mode: {self.processing_mode}, using realtime")
+                self._process_single_interaction(metrics)
             
         except Exception as e:
             self.logger.error(f"Failed to record complete query interaction: {e}")
+    
+    def switch_processing_mode(self, new_mode: str) -> bool:
+        """
+        처리 모드 전환
+        
+        Args:
+            new_mode: 새로운 처리 모드 ("realtime" 또는 "batch")
+            
+        Returns:
+            bool: 전환 성공 여부
+        """
+        try:
+            new_mode = new_mode.lower()
+            if new_mode not in ["realtime", "batch"]:
+                self.logger.error(f"Invalid processing mode: {new_mode}")
+                return False
+            
+            if new_mode == self.processing_mode:
+                self.logger.debug(f"Already in {new_mode} mode")
+                return True
+            
+            # 현재 모드 중지
+            if self.processing_mode == "batch":
+                self._stop_batch_processing()
+            
+            # 새 모드 시작
+            self.processing_mode = new_mode
+            if new_mode == "batch":
+                self._start_batch_processing()
+            
+            self.logger.info(f"Switched processing mode to {new_mode}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to switch processing mode: {e}")
+            return False
+    
+    def _convert_to_learning_format(self, metrics: QueryInteractionMetrics) -> Dict[str, Any]:
+        """
+        통계 데이터를 학습 시스템에 적합한 형식으로 변환
+        
+        Args:
+            metrics: 쿼리 상호작용 메트릭스
+            
+        Returns:
+            변환된 학습 데이터 딕셔너리
+        """
+        try:
+            learning_data = {
+                "mapping_result": metrics.mapping_result or {},
+                "metadata": {
+                    "intent": metrics.intent,
+                    "intent_confidence": metrics.intent_confidence,
+                    "intent_reasoning": metrics.intent_reasoning,
+                    "timestamp": metrics.timestamp,
+                    "session_id": metrics.session_id,
+                    "user_id": metrics.user_id,
+                    "processing_time_ms": metrics.total_processing_time_ms,
+                    "response_time_ms": metrics.response_time_ms,
+                    "validation_passed": metrics.validation_passed,
+                    "execution_success": metrics.execution_success,
+                    "execution_result_count": metrics.execution_result_count,
+                    "template_used": metrics.template_used
+                },
+                "schema_mapping": metrics.schema_mapping,
+                "sql_query": metrics.sql_query,
+                "user_feedback": metrics.user_feedback
+            }
+            
+            # 성공 여부에 따른 추가 메타데이터
+            if metrics.execution_success and metrics.validation_passed:
+                learning_data["metadata"]["quality_score"] = metrics.intent_confidence
+            else:
+                learning_data["metadata"]["error_indicators"] = {
+                    "validation_failed": not metrics.validation_passed,
+                    "execution_failed": not metrics.execution_success,
+                    "is_error": metrics.is_error,
+                    "error_message": metrics.error_message
+                }
+            
+            return learning_data
+            
+        except Exception as e:
+            self.logger.error(f"Failed to convert metrics to learning format: {e}")
+            return {"mapping_result": metrics.mapping_result or {}}
+    
+    def filter_metrics_by_confidence(
+        self, 
+        metrics_list: List[QueryInteractionMetrics], 
+        min_confidence: float = 0.0,
+        max_confidence: float = 1.0
+    ) -> List[QueryInteractionMetrics]:
+        """
+        신뢰도 점수 기반 메트릭 필터링
+        
+        Args:
+            metrics_list: 필터링할 메트릭 리스트
+            min_confidence: 최소 신뢰도 (포함)
+            max_confidence: 최대 신뢰도 (포함)
+            
+        Returns:
+            필터링된 메트릭 리스트
+        """
+        try:
+            return [
+                m for m in metrics_list
+                if min_confidence <= m.intent_confidence <= max_confidence
+            ]
+        except Exception as e:
+            self.logger.error(f"Failed to filter metrics by confidence: {e}")
+            return []
+    
+    def filter_metrics_by_intent(
+        self,
+        metrics_list: List[QueryInteractionMetrics],
+        intent_filter: List[str]
+    ) -> List[QueryInteractionMetrics]:
+        """
+        의도 카테고리별 메트릭 필터링
+        
+        Args:
+            metrics_list: 필터링할 메트릭 리스트
+            intent_filter: 포함할 의도 리스트 (예: ["SIMPLE_AGGREGATION", "COMPLEX_ANALYSIS"])
+            
+        Returns:
+            필터링된 메트릭 리스트
+        """
+        try:
+            if not intent_filter:
+                return metrics_list
+            
+            intent_set = set(intent_filter)
+            return [m for m in metrics_list if m.intent in intent_set]
+            
+        except Exception as e:
+            self.logger.error(f"Failed to filter metrics by intent: {e}")
+            return []
+    
+    def filter_metrics_by_time_range(
+        self,
+        metrics_list: List[QueryInteractionMetrics],
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
+    ) -> List[QueryInteractionMetrics]:
+        """
+        시간 범위 기반 메트릭 필터링
+        
+        Args:
+            metrics_list: 필터링할 메트릭 리스트
+            start_time: 시작 시간 (Unix timestamp, 선택사항)
+            end_time: 종료 시간 (Unix timestamp, 선택사항)
+            
+        Returns:
+            필터링된 메트릭 리스트
+        """
+        try:
+            filtered = metrics_list
+            
+            if start_time is not None:
+                filtered = [m for m in filtered if m.timestamp >= start_time]
+            
+            if end_time is not None:
+                filtered = [m for m in filtered if m.timestamp <= end_time]
+            
+            return filtered
+            
+        except Exception as e:
+            self.logger.error(f"Failed to filter metrics by time range: {e}")
+            return []
+    
+    def extract_learning_metrics_batch(
+        self,
+        metrics_list: List[QueryInteractionMetrics],
+        confidence_threshold: float = 0.5,
+        intent_filter: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        메트릭 리스트에서 학습 데이터 추출 (배치 처리)
+        
+        Args:
+            metrics_list: 추출할 메트릭 리스트
+            confidence_threshold: 최소 신뢰도 임계값
+            intent_filter: 포함할 의도 필터 (None이면 모든 의도 포함)
+            
+        Returns:
+            학습 시스템에 적합한 형식의 데이터 리스트
+        """
+        try:
+            # 필터링
+            filtered = self.filter_metrics_by_confidence(
+                metrics_list,
+                min_confidence=confidence_threshold
+            )
+            
+            if intent_filter:
+                filtered = self.filter_metrics_by_intent(filtered, intent_filter)
+            
+            # 변환
+            learning_data_list = [
+                self._convert_to_learning_format(m) for m in filtered
+            ]
+            
+            self.logger.info(
+                f"Extracted {len(learning_data_list)} learning metrics "
+                f"from {len(metrics_list)} total metrics "
+                f"(confidence >= {confidence_threshold}, "
+                f"intent_filter: {intent_filter or 'all'})"
+            )
+            
+            return learning_data_list
+            
+        except Exception as e:
+            self.logger.error(f"Failed to extract learning metrics batch: {e}")
+            return []
     
     def get_unified_insights(self) -> Dict[str, Any]:
         """
@@ -1040,9 +1353,27 @@ class LearningDataIntegrator:
 _integrator: Optional[LearningDataIntegrator] = None
 
 
-def get_integrator() -> LearningDataIntegrator:
-    """Get the global learning data integrator instance"""
+def get_integrator(
+    processing_mode: str = "realtime",
+    batch_size: int = 10,
+    batch_interval_seconds: float = 60.0
+) -> LearningDataIntegrator:
+    """
+    Get the global learning data integrator instance
+    
+    Args:
+        processing_mode: 처리 모드 ("realtime" 또는 "batch")
+        batch_size: 배치 모드에서 일괄 처리할 최대 쿼리 수
+        batch_interval_seconds: 배치 모드에서 처리 간격 (초)
+        
+    Returns:
+        LearningDataIntegrator 인스턴스
+    """
     global _integrator
     if _integrator is None:
-        _integrator = LearningDataIntegrator()
+        _integrator = LearningDataIntegrator(
+            processing_mode=processing_mode,
+            batch_size=batch_size,
+            batch_interval_seconds=batch_interval_seconds
+        )
     return _integrator

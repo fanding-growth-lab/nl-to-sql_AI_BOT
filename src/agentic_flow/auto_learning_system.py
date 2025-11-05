@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict, Counter
 import re
 import os
+from pathlib import Path
 import threading
 import queue
 import time
@@ -52,8 +53,16 @@ class UserBehavior:
 class AutoLearningSystem:
     """자동 학습 시스템"""
     
-    def __init__(self, learning_data_path: str = "src/agentic_flow/learning_data.json"):
-        self.learning_data_path = learning_data_path
+    def __init__(self, learning_data_path: Optional[str] = None):
+        # 경로가 제공되지 않으면 기본 경로 사용
+        if learning_data_path is None:
+            # 프로젝트 루트 기준으로 절대 경로 생성
+            current_file = Path(__file__)
+            project_root = current_file.parent.parent.parent  # src/agentic_flow -> src -> project_root
+            learning_data_path = str(project_root / "src" / "agentic_flow" / "learning_data.json")
+        
+        # Path 객체로 변환하여 정규화
+        self.learning_data_path = str(Path(learning_data_path).resolve())
         self.query_patterns: Dict[str, QueryPattern] = {}
         self.user_behaviors: Dict[str, UserBehavior] = {}
         self.learning_metrics = LearningMetrics()
@@ -79,8 +88,9 @@ class AutoLearningSystem:
     def _load_learning_data(self):
         """학습 데이터 로드"""
         try:
-            if os.path.exists(self.learning_data_path):
-                with open(self.learning_data_path, 'r', encoding='utf-8') as f:
+            learning_file = Path(self.learning_data_path)
+            if learning_file.exists():
+                with open(learning_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     
                 # 쿼리 패턴 로드
@@ -127,6 +137,10 @@ class AutoLearningSystem:
     def _save_learning_data(self):
         """학습 데이터 저장"""
         try:
+            learning_file = Path(self.learning_data_path)
+            # 디렉토리 생성
+            learning_file.parent.mkdir(parents=True, exist_ok=True)
+            
             data = {
                 "query_patterns": {},
                 "user_behaviors": {},
@@ -162,8 +176,7 @@ class AutoLearningSystem:
                 }
             
             # 파일 저장
-            os.makedirs(os.path.dirname(self.learning_data_path), exist_ok=True)
-            with open(self.learning_data_path, 'w', encoding='utf-8') as f:
+            with open(learning_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             
             logger.info("학습 데이터 저장 완료")

@@ -64,7 +64,7 @@ class SlackEventHandler:
             logger.info("All Slack handlers initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to initialize Slack handlers: {str(e)}", exc_info=True)
+            logger.error(f"Failed to initialize Slack handlers: {str(e)}")
             raise
     
     def get_handler_status(self) -> Dict[str, Any]:

@@ -145,6 +145,16 @@ def _make_serializable(obj: Any) -> Any:
         return obj
     
     else:
+        # Handle numpy types and other numeric types
+        try:
+            import numpy as np
+            if isinstance(obj, (np.integer, np.floating)):
+                return float(obj) if isinstance(obj, np.floating) else int(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+        
         # For other types, convert to string
         return str(obj)
 
@@ -190,6 +200,8 @@ def merge_states(base_state: AgentState, update_state: Dict[str, Any]) -> AgentS
     """
     Merge update state into base state.
     
+    불필요한 복사 최소화 및 인플레이스 업데이트 최적화
+    
     Args:
         base_state: Base pipeline state
         update_state: State updates to merge
@@ -198,6 +210,12 @@ def merge_states(base_state: AgentState, update_state: Dict[str, Any]) -> AgentS
         Merged pipeline state
     """
     try:
+        # update_state가 비어있으면 복사 없이 base_state 반환
+        if not update_state:
+            return base_state
+        
+        # update_state의 키가 base_state에 모두 있고 값이 동일하면 복사 불필요
+        # 하지만 TypedDict는 불변성을 보장하기 위해 복사 필요
         merged_state = base_state.copy()
         
         for key, value in update_state.items():
@@ -205,18 +223,21 @@ def merge_states(base_state: AgentState, update_state: Dict[str, Any]) -> AgentS
                 # Handle special merging logic for specific fields
                 if key == "confidence_scores" and isinstance(value, dict):
                     if isinstance(merged_state[key], dict):
+                        # dict.update()는 인플레이스 업데이트 (추가 복사 없음)
                         merged_state[key].update(value)
                     else:
                         merged_state[key] = value
                 
                 elif key == "debug_info" and isinstance(value, dict):
                     if isinstance(merged_state[key], dict):
+                        # dict.update()는 인플레이스 업데이트 (추가 복사 없음)
                         merged_state[key].update(value)
                     else:
                         merged_state[key] = value
                 
                 elif key == "node_results" and isinstance(value, list):
                     if isinstance(merged_state[key], list):
+                        # list.extend()는 인플레이스 업데이트 (추가 복사 없음)
                         merged_state[key].extend(value)
                     else:
                         merged_state[key] = value
