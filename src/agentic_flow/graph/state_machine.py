@@ -135,6 +135,31 @@ class AgentState(TypedDict):
     # Conversation history for context awareness
     conversation_history: Optional[List[Dict[str, str]]]  # [{"role": "user|assistant", "content": "..."}]
     
+    # Query result cache for conversation context (하이브리드 접근: 구조화된 결과 재사용)
+    query_result_cache: Optional[Dict[str, Any]]  # 이전 쿼리 결과 캐시 (쿼리 패턴 기반 키)
+    # 예시: {
+    #   "sales_top_creators_2025-10": {
+    #     "query": "10월 기준 매출 TOP 3 크리에이터 이름을 알려줘",
+    #     "result": [...],
+    #     "sql": "...",
+    #     "python_code": "...",  # COMPLEX_ANALYSIS인 경우
+    #     "params": {"month": "2025-10", "top_k": 3},
+    #     "timestamp": "...",
+    #     "intent": "SIMPLE_AGGREGATION" or "COMPLEX_ANALYSIS",
+    #     "data_summary": "이전에 생성된 요약"
+    #   }
+    # }
+    
+    # Resolved context (현재 쿼리와 이전 쿼리 매칭 정보)
+    resolved_context: Optional[Dict[str, Any]]  # 현재 쿼리 해석 결과
+    # 예시: {
+    #   "previous_query_key": "sales_top_creators_2025-10",
+    #   "reusable_result": True/False,
+    #   "extracted_params": {"creator_no": 3142, ...},
+    #   "previous_answer": "이전 답변 텍스트",
+    #   "match_confidence": 0.85
+    # }
+    
     # Additional fields for review
     review_status: Optional[str]
     review_result: Optional[Any]
@@ -1009,6 +1034,22 @@ def route_after_validation(state: AgentState) -> str:
         (isinstance(dynamic_sql_result, dict) and dynamic_sql_result.get("sql_query"))
     )
     
+    # 🔴 핵심 수정: SQL이 없는 경우 재시도 무한 루프 방지
+    if not has_valid_sql:
+        # SQL이 생성되지 않은 경우 재시도 무한 루프 방지
+        if retry_count >= max_retries:
+            logger.warning("SQL generation failed and max retries exceeded, asking for clarification")
+            # clarification 요청으로 이동
+            state["conversation_response"] = "죄송합니다. 요청하신 쿼리를 처리할 수 없습니다. 더 구체적인 정보를 제공해주시겠어요?"
+            state["needs_clarification"] = True
+            state["retry_count"] = 0
+            return "validate"  # validation_check를 거쳐 data_summarization으로
+        else:
+            # 재시도 가능한 경우에만 재시도 (최대 3번)
+            logger.warning(f"SQL not generated, retrying SQL generation ({retry_count + 1}/{max_retries})")
+            state["retry_count"] = retry_count + 1
+            return "retry"
+    
     if conversation_response and not has_valid_sql:
         # SQL이 없고 conversation_response만 있는 경우 (GREETING, HELP_REQUEST 등)
         logger.info("Conversation response detected (no SQL), skipping validation and proceeding to execution")
@@ -1304,78 +1345,6 @@ def route_after_user_review(state: AgentState) -> str:
     return "reject"
 
 
-def _execute_sql_query_simple(state: AgentState) -> AgentState:
-    """
-    간단한 SQL 실행 (Python 경로용, 데이터 추출 전용)
-    
-    복잡한 검증 없이 기본 구문/보안 검사만 수행하고 바로 실행합니다.
-    Python 코드 실행을 위한 데이터 추출이 목적이므로, 
-    validation_check, user_review 등은 생략합니다.
-    
-    Args:
-        state: Current pipeline state
-        
-    Returns:
-        Updated state with query results
-    """
-    logger.info("Executing SQL query (simple mode for Python path)")
-    
-    start_time = time.time()
-    state["current_node"] = "simple_sql_execution"
-    state["execution_status"] = ExecutionStatus.IN_PROGRESS.value
-    
-    try:
-        sql_query = state.get("sql_query")
-        if not sql_query:
-            raise ValueError("No SQL query to execute")
-        
-        # 간단한 구문 검사만 (복잡한 검증 생략)
-        # SQL 주입 방지를 위한 기본적인 검사만 수행
-        dangerous_keywords = ["DROP", "DELETE", "TRUNCATE", "ALTER", "CREATE", "GRANT", "REVOKE"]
-        sql_upper = sql_query.upper()
-        
-        for keyword in dangerous_keywords:
-            if keyword in sql_upper:
-                raise ValueError(f"Dangerous SQL keyword detected: {keyword}")
-        
-        # SQL 파라미터 가져오기 (SQL Injection 방지)
-        sql_params = state.get("sql_params")
-        
-        # Execute the query with parameters (if available)
-        result = execute_query(sql_query, params=sql_params, readonly=True)
-        execution_time = time.time() - start_time
-        
-        # Handle different return types
-        if isinstance(result, int):
-            query_result: List[Dict[str, Any]] = []
-            logger.info(f"Query executed successfully (affected rows: {result})")
-        else:
-            query_result = result if isinstance(result, list) else []
-            if result is None:
-                logger.warning("SQL query returned None, treating as empty result")
-        
-        # Update state
-        state["query_result"] = query_result
-        state["execution_time"] = execution_time
-        state["success"] = True
-        state["execution_status"] = ExecutionStatus.COMPLETED.value
-        
-        logger.info(f"Simple SQL execution completed in {execution_time:.2f}s, returned {len(query_result)} rows")
-        
-    except Exception as e:
-        execution_time = time.time() - start_time
-        error_msg = f"Simple SQL execution failed: {str(e)}"
-        
-        logger.error(error_msg)
-        
-        # Update state with error
-        state["error_message"] = error_msg
-        state["success"] = False
-        state["execution_status"] = ExecutionStatus.FAILED.value
-    
-    return state
-
-
 def _execute_sql_query(state: AgentState) -> AgentState:
     """
     Execute the validated SQL query.
@@ -1558,6 +1527,10 @@ def initialize_state(
         
         # Conversation history
         conversation_history=conversation_history or [],
+        
+        # Query result cache for conversation context
+        query_result_cache=None,
+        resolved_context=None,
         
         # Additional fields for review
         review_status=None,

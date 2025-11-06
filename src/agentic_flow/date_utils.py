@@ -100,6 +100,42 @@ class DateUtils:
         return None
     
     @staticmethod
+    def extract_date_from_query(query: str) -> Optional[Tuple[int, int, Optional[int]]]:
+        """
+        쿼리에서 연도, 월, 일 정보를 함께 추출
+        
+        Args:
+            query: 사용자 쿼리
+            
+        Returns:
+            (연도, 월, 일) 튜플 (일이 없으면 None) 또는 None
+        """
+        query_lower = query.lower()
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        
+        # "11월 1일" 패턴: (\d+)월\s*(\d+)일
+        full_date_pattern = r'(\d+)월\s*(\d+)일'
+        full_date_match = re.search(full_date_pattern, query_lower)
+        if full_date_match:
+            month = int(full_date_match.group(1))
+            day = int(full_date_match.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                # 연도 정보가 있는지 확인
+                year = DateUtils._extract_year_from_query(query_lower)
+                if not year:
+                    year = current_year
+                return (year, month, day)
+        
+        # "11월" 패턴: 월만 있는 경우
+        month_info = DateUtils.extract_month_with_year_from_query(query)
+        if month_info:
+            year, month = month_info
+            return (year, month, None)
+        
+        return None
+    
+    @staticmethod
     def _extract_year_from_query(query_lower: str) -> Optional[int]:
         """
         쿼리에서 연도 정보 추출

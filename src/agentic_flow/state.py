@@ -257,13 +257,6 @@ def set_sql_result(state: GraphState, sql_query: str, confidence: float = 1.0) -
     return state
 
 
-def set_rag_mapping_result(state: GraphState, rag_result: Any) -> GraphState:
-    """Set RAG mapping result in state."""
-    state["rag_mapping_result"] = rag_result
-    state["sql_query"] = rag_result.sql_template if hasattr(rag_result, 'sql_template') else None
-    return state
-
-
 def set_dynamic_pattern(state: GraphState, pattern: Any) -> GraphState:
     """Set dynamic pattern result in state."""
     state["dynamic_pattern"] = pattern

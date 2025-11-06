@@ -53,6 +53,17 @@ class SlackBot:
                 signing_secret=self.config.signing_secret
             )
             
+            # Add middleware to log all incoming events for debugging
+            @self.app.middleware
+            def log_all_events(body: dict, next):
+                """Log all incoming Slack events for debugging."""
+                event_type = body.get("type") or body.get("event", {}).get("type", "unknown")
+                logger.debug(f"[Slack Event] Type: {event_type}, Body keys: {list(body.keys())}")
+                if "event" in body:
+                    event = body["event"]
+                    logger.debug(f"[Slack Event] Event details: type={event.get('type')}, subtype={event.get('subtype')}, channel={event.get('channel')}, user={event.get('user')}")
+                return next()
+            
             logger.info("Slack bot initialized successfully")
             
         except Exception as e:

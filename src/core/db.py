@@ -793,54 +793,78 @@ def get_cached_db_schema() -> Dict[str, Any]:
         inspector = inspect(engine)
         
         db_schema = {}
-        for table_name in inspector.get_table_names():
-            # 't_'로 시작하는 테이블만 포함 (필터링 로직)
-            if not table_name.startswith("t_"):
-                continue
+        
+        # 테이블 로드 ('t_'로 시작하는 테이블만)
+        table_names = [t for t in inspector.get_table_names() if t.startswith("t_")]
+        
+        # 뷰 로드 ('v_'로 시작하는 뷰만)
+        try:
+            view_names = [v for v in inspector.get_view_names() if v.startswith("v_")]
+        except Exception as e:
+            # get_view_names()가 지원되지 않는 경우 빈 리스트
+            logger.debug(f"get_view_names() not supported or failed: {e}")
+            view_names = []
+        
+        # 테이블과 뷰 모두 처리
+        all_names = table_names + view_names
+        
+        for object_name in all_names:
+            is_view = object_name.startswith("v_")
             
-            # 테이블 코멘트 가져오기 (제약조건 정보 필터링)
+            # 테이블/뷰 코멘트 가져오기 (제약조건 정보 필터링)
             try:
-                table_comment = inspector.get_table_comment(table_name)
-                if table_comment and table_comment.get("text"):
-                    comment_text = table_comment.get("text")
-                    # 제약조건 정보가 포함된 경우 순수한 설명만 추출
-                    if "CONSTRAINT" in comment_text or "FOREIGN KEY" in comment_text:
-                        # 제약조건 정보 제거하고 순수한 설명만 사용
-                        lines = comment_text.split('\n')
-                        clean_lines = []
-                        for line in lines:
-                            line = line.strip()
-                            if not (line.startswith('CONSTRAINT') or 
-                                   line.startswith('FOREIGN KEY') or 
-                                   line.startswith('REFERENCES') or
-                                   line.startswith('PRIMARY KEY')):
-                                clean_lines.append(line)
-                        table_description = ' '.join(clean_lines).strip() or f"{table_name} table"
-                    else:
-                        table_description = comment_text
+                if is_view:
+                    # 뷰는 코멘트가 없을 수 있으므로 기본 설명 사용
+                    object_description = f"{object_name} view"
                 else:
-                    table_description = f"{table_name} table"
+                    table_comment = inspector.get_table_comment(object_name)
+                    if table_comment and table_comment.get("text"):
+                        comment_text = table_comment.get("text")
+                        # 제약조건 정보가 포함된 경우 순수한 설명만 추출
+                        if "CONSTRAINT" in comment_text or "FOREIGN KEY" in comment_text:
+                            # 제약조건 정보 제거하고 순수한 설명만 사용
+                            lines = comment_text.split('\n')
+                            clean_lines = []
+                            for line in lines:
+                                line = line.strip()
+                                if not (line.startswith('CONSTRAINT') or 
+                                       line.startswith('FOREIGN KEY') or 
+                                       line.startswith('REFERENCES') or
+                                       line.startswith('PRIMARY KEY')):
+                                    clean_lines.append(line)
+                            object_description = ' '.join(clean_lines).strip() or f"{object_name} table"
+                        else:
+                            object_description = comment_text
+                    else:
+                        object_description = f"{object_name} table"
             except Exception as e:
                 # 스키마 파싱 오류 시 기본값 사용
-                logger.debug(f"테이블 코멘트 파싱 실패 ({table_name}): {e}")
-                table_description = f"{table_name} table"
+                logger.debug(f"{'뷰' if is_view else '테이블'} 코멘트 파싱 실패 ({object_name}): {e}")
+                object_description = f"{object_name} {'view' if is_view else 'table'}"
             
             # 컬럼 정보 수집
             columns = {}
-            for column in inspector.get_columns(table_name):
-                columns[column['name']] = {
-                    "type": str(column['type']),
-                    "description": column.get('comment', ''),
-                    "nullable": column.get('nullable', True),
-                    "default": column.get('default')
-                }
+            try:
+                for column in inspector.get_columns(object_name):
+                    columns[column['name']] = {
+                        "type": str(column['type']),
+                        "description": column.get('comment', ''),
+                        "nullable": column.get('nullable', True),
+                        "default": column.get('default')
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to get columns for {object_name}: {e}")
+                columns = {}
             
-            db_schema[table_name] = {
-                "description": table_description,
-                "columns": columns
+            db_schema[object_name] = {
+                "description": object_description,
+                "columns": columns,
+                "type": "view" if is_view else "table"
             }
         
-        logger.info(f"Database schema loaded and cached: {len(db_schema)} tables")
+        table_count = len(table_names)
+        view_count = len(view_names)
+        logger.info(f"Database schema loaded and cached: {table_count} tables, {view_count} views (total: {len(db_schema)} objects)")
         return db_schema
         
     except OperationalError as e:

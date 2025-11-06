@@ -19,18 +19,55 @@ from monitoring.error_monitor import record_slack_error, record_sql_generation_e
 class MessageHandler(BaseSlackHandler):
     """Handler for Slack message events."""
     
-    # Class-level set to track processed events (prevent duplicates)
-    _processed_events: set = set()
+    def __init__(self, app, agent_runner=None):
+        """Initialize the message handler."""
+        # Instance-level set to track processed events (prevent duplicates)
+        # Use instance variable instead of class variable to avoid issues with multiple instances
+        self._processed_events: set = set()
+        super().__init__(app, agent_runner)
     
     def _register_handlers(self):
         """Register message event handlers."""
-        # Register message handler for direct messages
-        self.app.message()(self.handle_message)
-        
-        # Register app mention handler for channel mentions
-        self.app.event("app_mention")(self.handle_app_mention)
-        
-        logger.info("Message handlers registered successfully")
+        try:
+            # Register event handler for all message events (including subtypes)
+            # This handles message_deleted, message_changed, etc. to prevent 404 errors
+            @self.app.event("message")
+            def handle_message_events(event, say):
+                """Handle all message events including subtypes."""
+                subtype = event.get("subtype")
+                logger.debug(f"[MessageHandler] Received message event: type={event.get('type')}, subtype={subtype}, channel={event.get('channel')}")
+                
+                # Skip non-user message subtypes (deleted, changed, etc.)
+                if subtype in ["message_changed", "message_deleted", "message_replied", "thread_broadcast", "bot_message"]:
+                    logger.debug(f"Skipping message event with subtype: {subtype}")
+                    return
+                
+                # Process regular messages
+                self.handle_message(event, say)
+            
+            # Register message handler for direct messages (backup/alternative route)
+            # Use filter to ensure we catch all messages, then filter inside the handler
+            @self.app.message("")
+            def catch_all_messages(message, say):
+                """Catch all messages to ensure we receive them."""
+                logger.debug(f"[MessageHandler] Received message event: {message.get('type')}, subtype={message.get('subtype')}, channel={message.get('channel')}")
+                self.handle_message(message, say)
+            
+            logger.info("Message handler registered for direct messages")
+            
+            # Register app mention handler for channel mentions
+            @self.app.event("app_mention")
+            def catch_app_mentions(event, say):
+                """Catch all app mentions."""
+                logger.debug(f"[MessageHandler] Received app_mention event: {event.get('type')}, channel={event.get('channel')}")
+                self.handle_app_mention(event, say)
+            
+            logger.info("App mention handler registered for channel mentions")
+            
+            logger.info("Message handlers registered successfully")
+        except Exception as e:
+            logger.error(f"Failed to register message handlers: {str(e)}", exc_info=True)
+            raise
     
     def _is_event_processed(self, event_data: Dict[str, Any]) -> bool:
         """
@@ -46,17 +83,50 @@ class MessageHandler(BaseSlackHandler):
         event_ts = event_data.get("event_ts") or event_data.get("ts")
         channel_id = event_data.get("channel")
         user_id = event_data.get("user")
+        thread_ts = event_data.get("thread_ts")
         
         if not event_ts:
             # No timestamp, cannot track - process it
+            logger.debug(f"No timestamp found in event, processing: channel={channel_id}, user={user_id}")
             return False
         
         # Create unique event identifier
-        event_id = f"{event_ts}_{channel_id}_{user_id}"
+        # Include thread_ts to distinguish messages in the same thread
+        # Each message in a thread has a unique ts, but thread_ts helps with context
+        if thread_ts:
+            event_id = f"{event_ts}_{channel_id}_{user_id}_{thread_ts}"
+        else:
+            event_id = f"{event_ts}_{channel_id}_{user_id}"
         
         # Check if already processed
         if event_id in self._processed_events:
+            logger.info(f"Event already processed (skipping): event_id={event_id}, query={event_data.get('text', '')[:50]}, cache_size={len(self._processed_events)}")
             return True
+        
+        # Don't mark as processed here - mark it AFTER successful processing
+        # This prevents race conditions where Slack retries before processing completes
+        logger.debug(f"Event not yet processed: event_id={event_id}, query={event_data.get('text', '')[:50]}")
+        return False
+    
+    def _mark_event_processed(self, event_data: Dict[str, Any]) -> None:
+        """
+        Mark an event as processed after successful handling.
+        
+        Args:
+            event_data: Slack event data
+        """
+        event_ts = event_data.get("event_ts") or event_data.get("ts")
+        channel_id = event_data.get("channel")
+        user_id = event_data.get("user")
+        thread_ts = event_data.get("thread_ts")
+        
+        if not event_ts:
+            return
+        
+        if thread_ts:
+            event_id = f"{event_ts}_{channel_id}_{user_id}_{thread_ts}"
+        else:
+            event_id = f"{event_ts}_{channel_id}_{user_id}"
         
         # Mark as processed (keep last 1000 events to prevent memory leak)
         self._processed_events.add(event_id)
@@ -64,7 +134,7 @@ class MessageHandler(BaseSlackHandler):
             # Remove oldest entries (simple cleanup, keep recent 500)
             self._processed_events = set(list(self._processed_events)[-500:])
         
-        return False
+        logger.info(f"Event marked as processed: event_id={event_id}, cache_size={len(self._processed_events)}")
     
     def handle_message(self, message: Dict[str, Any], say: Callable[..., None]):
         """
@@ -75,19 +145,25 @@ class MessageHandler(BaseSlackHandler):
             say: Function to send response message
         """
         try:
+            # Log incoming message for debugging
+            logger.debug(f"Received message event: {message.get('type')}, subtype: {message.get('subtype')}, channel: {message.get('channel')}")
+            
             # Skip message_changed, message_deleted, and other non-user message subtypes
             # These events occur when users edit or delete messages, which we should ignore
             subtype = message.get("subtype")
             if subtype in ["message_changed", "message_deleted", "message_replied", "thread_broadcast"]:
                 # Silently ignore these events - they are not user-initiated queries
+                logger.debug(f"Skipping message with subtype: {subtype}")
                 return
             
             # Skip bot messages to avoid infinite loops
             if self._is_bot_message(message):
+                logger.debug("Skipping bot message")
                 return
             
             # Check for duplicate events
             if self._is_event_processed(message):
+                logger.info(f"Skipping duplicate message event: channel={channel_id}, user={message.get('user')}, ts={message.get('ts')}")
                 return
             
             # Only respond to direct messages
@@ -97,17 +173,31 @@ class MessageHandler(BaseSlackHandler):
             
             if not channel_id or not channel_id.startswith('D'):
                 # Not a DM, skip processing
+                logger.debug(f"Skipping non-DM message: channel_id={channel_id}")
                 return
             
             # Extract and validate query
             query = message.get("text", "").strip()
             thread_ts = self._get_thread_timestamp(message)
             
+            logger.info(f"Processing DM message: query='{query[:50]}...', channel={channel_id}, user={message.get('user')}")
+            
             # Process using common logic
             self._process_and_respond(query, message, say, thread_ts, is_mention=False)
+            
+            # Mark as processed AFTER successful processing
+            self._mark_event_processed(message)
                 
         except Exception as e:
-            say("❌ 메시지 처리 중 오류가 발생했습니다.")
+            logger.error(f"Error in handle_message: {str(e)}", exc_info=True)
+            try:
+                say("❌ 메시지 처리 중 오류가 발생했습니다.")
+                # Mark as processed even on error to prevent infinite retries
+                self._mark_event_processed(message)
+            except Exception as say_error:
+                logger.error(f"Failed to send error message: {str(say_error)}")
+                # Mark as processed even if error message fails
+                self._mark_event_processed(message)
     
     def handle_app_mention(self, event: Dict[str, Any], say: Callable[..., None]):
         """
@@ -118,19 +208,37 @@ class MessageHandler(BaseSlackHandler):
             say: Function to send response message
         """
         try:
+            # Log incoming mention for debugging
+            logger.debug(f"Received app_mention event: channel={event.get('channel')}, user={event.get('user')}, thread_ts={event.get('thread_ts')}, ts={event.get('ts')}")
+            
             # Check for duplicate events
             if self._is_event_processed(event):
+                logger.info(f"Skipping duplicate app_mention event: channel={event.get('channel')}, user={event.get('user')}, ts={event.get('ts')}")
                 return
             
             # Extract query from mention
             query = self._extract_query_from_mention(event.get("text", ""))
             thread_ts = self._get_thread_timestamp(event)
             
+            logger.info(f"Processing app_mention: query='{query[:50]}...', channel={event.get('channel')}, user={event.get('user')}, thread_ts={thread_ts}")
+            
             # Process using common logic
             self._process_and_respond(query, event, say, thread_ts, is_mention=True)
+            
+            # Mark as processed AFTER successful processing
+            self._mark_event_processed(event)
                 
         except Exception as e:
-            say("❌ 멘션 처리 중 오류가 발생했습니다.")
+            logger.error(f"Error in handle_app_mention: {str(e)}", exc_info=True)
+            try:
+                thread_ts = self._get_thread_timestamp(event)
+                say("❌ 멘션 처리 중 오류가 발생했습니다.", thread_ts=thread_ts)
+                # Mark as processed even on error to prevent infinite retries
+                self._mark_event_processed(event)
+            except Exception as say_error:
+                logger.error(f"Failed to send error message: {str(say_error)}")
+                # Mark as processed even if error message fails
+                self._mark_event_processed(event)
     
     def _process_and_respond(self, query: str, event_data: Dict[str, Any], say: Callable[..., None], thread_ts: Optional[str], is_mention: bool):
         """

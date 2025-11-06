@@ -76,6 +76,8 @@ class ResultIntegratorNode:
                     }
                 }
                 self.logger.info("Integrated SQL result for SIMPLE_AGGREGATION")
+                # 쿼리 결과를 캐시에 저장 (하이브리드 접근)
+                self._save_query_result_to_cache(state)
                 return state
         
         # COMPLEX_ANALYSIS: Python 결과 우선, 없으면 SQL 결과 사용
@@ -99,6 +101,8 @@ class ResultIntegratorNode:
                     }
                 }
                 self.logger.info("Integrated Python result for COMPLEX_ANALYSIS")
+                # Python 결과를 캐시에 저장 (하이브리드 접근)
+                self._save_query_result_to_cache(state)
             elif sql_result:
                 # Python 실행 실패 시 SQL 결과로 폴백
                 state["integrated_result"] = {
@@ -153,6 +157,10 @@ class ResultIntegratorNode:
                 "execution_metadata": {}
             }
         
+        # 쿼리 결과를 캐시에 저장 (하이브리드 접근)
+        if state.get("integrated_result", {}).get("success"):
+            self._save_query_result_to_cache(state)
+        
         return state
     
     def _normalize_result(self, result: Any) -> List[Dict[str, Any]]:
@@ -204,4 +212,120 @@ class ResultIntegratorNode:
             return python_result, "python", confidence_python
         else:
             return sql_result, "sql", confidence_sql
+    
+    def _save_query_result_to_cache(self, state: GraphState) -> None:
+        """
+        쿼리 결과를 구조화된 캐시에 저장 (하이브리드 접근)
+        
+        Args:
+            state: 현재 파이프라인 상태
+        """
+        try:
+            import hashlib
+            import json
+            from datetime import datetime
+            
+            # 캐시 초기화
+            if state.get("query_result_cache") is None:
+                state["query_result_cache"] = {}
+            
+            # 쿼리 패턴 기반 키 생성
+            user_query = state.get("user_query", "")
+            intent_raw = state.get("intent", "")
+            # QueryIntent enum을 문자열로 변환
+            intent = intent_raw.value if hasattr(intent_raw, 'value') else str(intent_raw)
+            sql_query = state.get("final_sql") or state.get("sql_query")
+            python_code = state.get("python_code")
+            
+            # 키 생성: 쿼리 패턴 + 파라미터 조합
+            cache_key = self._generate_cache_key(user_query, intent, state)
+            
+            # 캐시 데이터 구성
+            integrated_result = state.get("integrated_result", {})
+            cache_data = {
+                "query": user_query,
+                "intent": intent,
+                "result": integrated_result.get("result", []),
+                "sql": sql_query,
+                "python_code": python_code,
+                "params": state.get("sql_params", {}),
+                "timestamp": datetime.now().isoformat(),
+                "data_summary": state.get("data_summary"),  # data_summarization 노드에서 생성된 요약
+                "source": integrated_result.get("source", "unknown")
+            }
+            
+            # 캐시에 저장 (최대 10개까지만 유지)
+            cache = state["query_result_cache"]
+            if len(cache) >= 10:
+                # 가장 오래된 항목 제거 (timestamp 기준)
+                oldest_key = min(cache.keys(), key=lambda k: cache[k].get("timestamp", ""))
+                del cache[oldest_key]
+                self.logger.debug(f"Removed oldest cache entry: {oldest_key}")
+            
+            cache[cache_key] = cache_data
+            self.logger.info(f"Saved query result to cache with key: {cache_key}")
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to save query result to cache: {e}")
+    
+    def _generate_cache_key(self, user_query: str, intent: str, state: GraphState) -> str:
+        """
+        쿼리 패턴 기반 캐시 키 생성
+        
+        Args:
+            user_query: 사용자 쿼리
+            intent: 인텐트
+            state: 현재 상태
+            
+        Returns:
+            캐시 키 (문자열)
+        """
+        import re
+        import hashlib
+        
+        # 쿼리에서 패턴 추출 (날짜, TOP N, 크리에이터 등)
+        query_lower = user_query.lower()
+        
+        # 패턴 추출
+        patterns = []
+        
+        # 월/년 추출
+        month_match = re.search(r'(\d+)\s*월', query_lower)
+        if month_match:
+            patterns.append(f"month_{month_match.group(1)}")
+        
+        year_match = re.search(r'(\d+)\s*년', query_lower)
+        if year_match:
+            patterns.append(f"year_{year_match.group(1)}")
+        
+        # TOP N 추출
+        top_match = re.search(r'top\s*(\d+)', query_lower) or re.search(r'(\d+)\s*위', query_lower)
+        if top_match:
+            patterns.append(f"top_{top_match.group(1)}")
+        
+        # 키워드 추출 (매출, 신규 회원, 정산금액, etc.)
+        keywords = []
+        if any(kw in query_lower for kw in ["매출", "sales", "정산", "정산금액", "결제", "수익", "매출액", "금액", "수익금", "revenue", "payment", "settlement"]):
+            keywords.append("sales")
+        if "신규" in query_lower or "new" in query_lower:
+            keywords.append("new_members")
+        if "크리에이터" in query_lower or "creator" in query_lower:
+            keywords.append("creator")
+        
+        # 파라미터 기반 키 (creator_no 등)
+        sql_params = state.get("sql_params", {})
+        param_keys = []
+        if "creator_no" in sql_params:
+            param_keys.append(f"creator_{sql_params['creator_no']}")
+        
+        # 키 조합
+        key_parts = [intent] + patterns + keywords + param_keys
+        
+        # 키가 너무 길면 해시 사용
+        key_string = "_".join(key_parts) if key_parts else user_query[:50]
+        if len(key_string) > 100:
+            key_hash = hashlib.md5(key_string.encode()).hexdigest()[:8]
+            return f"{intent}_{key_hash}"
+        
+        return key_string
 

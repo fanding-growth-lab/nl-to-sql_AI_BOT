@@ -173,6 +173,11 @@ class AgentGraphRunner:
             max_messages=10
         )
         
+        # Restore query result cache from previous state (하이브리드 접근)
+        query_result_cache = self._restore_query_result_cache(
+            session_id=session_id
+        )
+        
         # Initialize state with business metadata and conversation history
         initial_state = initialize_state(
             user_query=user_query,
@@ -183,6 +188,11 @@ class AgentGraphRunner:
             max_retries=max_retries,
             conversation_history=conversation_history
         )
+        
+        # Restore query result cache to initial state
+        if query_result_cache:
+            initial_state["query_result_cache"] = query_result_cache
+            logger.debug(f"Restored {len(query_result_cache)} cached query results for session {session_id}")
         
         # Log conversation history for debugging
         if conversation_history:
@@ -367,6 +377,11 @@ class AgentGraphRunner:
             max_messages=10
         )
         
+        # Restore query result cache from previous state (하이브리드 접근)
+        query_result_cache = self._restore_query_result_cache(
+            session_id=session_id
+        )
+        
         # Initialize state with business metadata and conversation history
         initial_state = initialize_state(
             user_query=user_query,
@@ -377,6 +392,11 @@ class AgentGraphRunner:
             max_retries=max_retries,
             conversation_history=conversation_history
         )
+        
+        # Restore query result cache to initial state
+        if query_result_cache:
+            initial_state["query_result_cache"] = query_result_cache
+            logger.debug(f"Restored {len(query_result_cache)} cached query results for async session {session_id}")
         
         # Log conversation history for debugging
         if conversation_history:
@@ -1293,6 +1313,44 @@ class AgentGraphRunner:
         except Exception as e:
             logger.warning(f"Failed to update conversation history in state: {str(e)}")
             # Non-critical error, continue execution
+    
+    def _restore_query_result_cache(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Restore query result cache from previous state using checkpointer (하이브리드 접근)
+        
+        Args:
+            session_id: Session identifier (thread_id for LangGraph)
+            
+        Returns:
+            Query result cache dictionary or None if not found
+        """
+        try:
+            checkpointer = self.checkpointer
+            config: Any = {"configurable": {"thread_id": session_id}}  # type: ignore[assignment]
+            
+            # Get the latest checkpoint for this thread
+            checkpoint = checkpointer.get(config)  # type: ignore[arg-type]
+            
+            if not checkpoint or not checkpoint.get("channel_values"):
+                logger.debug(f"No checkpoint found for session {session_id}")
+                return None
+            
+            # Extract state from checkpoint
+            state = checkpoint["channel_values"]
+            
+            # Extract query_result_cache from state
+            query_result_cache = state.get("query_result_cache")
+            
+            if query_result_cache and isinstance(query_result_cache, dict):
+                logger.debug(f"Restored query result cache with {len(query_result_cache)} entries for session {session_id}")
+                return query_result_cache
+            else:
+                logger.debug(f"No query result cache found in checkpoint for session {session_id}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Failed to restore query result cache for session {session_id}: {str(e)}")
+            return None
     
     def clear_session(self, session_id: str) -> bool:
         """

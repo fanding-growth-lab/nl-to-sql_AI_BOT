@@ -30,7 +30,7 @@ from .date_utils import DateUtils
 from .state import (
     GraphState, Entity, SchemaMapping, SQLResult, 
     QueryIntent, QueryComplexity,
-    set_sql_result, set_rag_mapping_result, set_dynamic_pattern, 
+    set_sql_result, set_dynamic_pattern, 
     set_fanding_template, set_conversation_response, clear_sql_generation,
     get_effective_sql, is_sql_generation_skipped
 )
@@ -146,6 +146,7 @@ DATE_KEYWORDS = ["신규", "현황", "월간", "일간", "주간", "년간"]
 LOGIN_KEYWORDS = ["로그인", "login", "접속"]
 RANKING_KEYWORDS = ["top", "top5", "top10", "상위", "최고", "많은", "적은", "순위"]
 STATISTICS_KEYWORDS = ["개수", "수", "합계", "평균", "최대", "최소", "통계", "분석"]
+PAYMENT_KEYWORDS = ["매출", "결제", "수익", "매출액", "revenue", "payment", "pay", "remain_price", "금액", "수익금"]
 
 # Confidence Thresholds
 LLM_CONFIDENCE_THRESHOLD_HIGH = 0.8
@@ -153,7 +154,8 @@ LLM_CONFIDENCE_THRESHOLD_MEDIUM = 0.6
 LLM_CONFIDENCE_THRESHOLD_LOW = 0.3
 RAG_CONFIDENCE_THRESHOLD = 0.6
 SQL_GENERATION_CONFIDENCE_THRESHOLD = 0.7
-
+ # 템플릿 매칭 점수 검증 (임계값: 0.6)
+TEMPLATE_MATCH_THRESHOLD = 0.6
 
 # Note: Response generator functions moved to prompts.py
 # Import them from prompts module instead
@@ -226,19 +228,59 @@ class BaseNode(ABC):
                     return creator_name
         
         # 패턴 2: "크리에이터명의" 형식 (예: "세상학 개론의 회원 수")
+        # 더 엄격한 패턴: "의" 앞에 최소 2글자 이상의 의미있는 이름이 있어야 함
         pattern2 = r'([가-힣a-zA-Z0-9\s]{2,30}?)\s*(?:의|이|가|을|를|에|에서|로|으로)\s+(?:신규|활성|회원|멤버|구독자|팔로워|수|개수|통계|분석|조회|보여|알려|찾아|가져)'
         match2 = re.search(pattern2, query, re.IGNORECASE)
         if match2:
             creator_name = match2.group(1).strip()
-            # 키워드 제외 리스트
-            exclude_keywords = ['크리에이터', 'creator', '상위', 'top', '인기', 'popular', '최고', '많은', '적은', '전체', '모든']
-            if creator_name and len(creator_name) >= 2 and creator_name.lower() not in [kw.lower() for kw in exclude_keywords]:
+            
+            # 확장된 제외 키워드 리스트
+            exclude_keywords = [
+                '크리에이터', 'creator', '상위', 'top', '인기', 'popular', '최고', '많은', '적은', '전체', '모든',
+                '이름을', '이름이', '이름은', '이름', 'name', 'names', 
+                '이름을 알려', '이름을 보여', '이름을 찾아', '이름을 가져', '이름을',
+                '중에서', '중에', '비교해서', '비교', '증가율', '성장률', '변화', '추이',
+                '매출도', '매출', '수익', '결제', '금액', '매출액',
+                '회원이', '회원이면', '회원을', '회원을', '회원도', '회원수',
+                '기준', '기준으로', '기준으로서',
+                '알려줘', '보여줘', '찾아줘', '가져와'
+            ]
+            
+            # 제외 키워드 체크 (부분 매칭 포함)
+            if creator_name and len(creator_name) >= 2:
+                creator_lower = creator_name.lower()
+                # 제외 키워드가 포함되어 있으면 제외
+                if any(exclude_kw in creator_lower for exclude_kw in exclude_keywords):
+                    self.logger.debug(f"Skipping extracted creator name '{creator_name}' (contains exclude keyword)")
+                    return None
+                
                 # 숫자나 날짜 표현이 포함된 경우 제외
-                if not re.search(r'\d+\s*(?:월|년|일|개|명|위)', creator_name):
-                    # "상위 5개" 같은 패턴 제외
-                    if not re.search(r'(상위|top|인기|최고)\s*\d+', creator_name, re.IGNORECASE):
-                        self.logger.debug(f"Extracted creator name (pattern 2): '{creator_name}'")
-                        return creator_name
+                if re.search(r'\d+\s*(?:월|년|일|개|명|위)', creator_name):
+                    return None
+                
+                # "상위 5개" 같은 패턴 제외
+                if re.search(r'(상위|top|인기|최고)\s*\d+', creator_name, re.IGNORECASE):
+                    return None
+                
+                # 문맥상 크리에이터 이름이 아닌 단어들 체크
+                # "이름을", "이름이" 같은 패턴이 추출된 경우 제외
+                if re.match(r'^이름[을이가]?$', creator_name, re.IGNORECASE):
+                    return None
+                
+                # "중에서", "매출도" 같은 패턴 제외
+                if re.match(r'^중\s*(?:에서|에)?$', creator_name, re.IGNORECASE):
+                    return None
+                
+                # "매출도", "매출을" 같은 패턴 제외
+                if re.match(r'^매출[도을를]?$', creator_name, re.IGNORECASE):
+                    return None
+                
+                # 너무 긴 문장이 추출된 경우 제외 (예: "신규 회원수를 비교해서 증가율이 가장 높은 크리에이터")
+                if len(creator_name) > 20 and any(kw in creator_name for kw in ['비교', '증가', '변화', '추이', '성장']):
+                    return None
+                
+                self.logger.debug(f"Extracted creator name (pattern 2): '{creator_name}'")
+                return creator_name
         
         # 패턴 3: "크리에이터 크리에이터명" 형식 (예: "크리에이터 세상학 개론")
         pattern3 = r'크리에이터\s+([가-힣a-zA-Z0-9\s]{2,30}?)(?:\s+(?:의|이|가|을|를|에|에서|로|으로)|신규|활성|회원|멤버|구독자|팔로워|수|개수|통계|분석|조회|보여|알려|찾아|가져|\s+\d+)'
@@ -252,6 +294,32 @@ class BaseNode(ABC):
                     return creator_name
         
         return None
+    
+    def _should_include_creator_name(self, query: str) -> bool:
+        """
+        쿼리가 크리에이터 이름(nickname)을 요청하는지 확인
+        
+        Args:
+            query: 사용자 쿼리
+            
+        Returns:
+            SQL에 크리에이터 nickname을 포함해야 하면 True
+        """
+        query_lower = query.lower()
+        # 이름 요청 패턴
+        name_request_patterns = [
+            "이름을 알려", "이름을 보여", "이름을 찾아", "이름을 가져",
+            "이름이 뭐", "이름은 뭐", "이름", "creator name", "nickname",
+            "크리에이터 이름", "크리에이터명", "크리에이터 이름을",
+            "누구야", "누구", "누가", "who", "who is", "who are",
+            "누구인지", "누구인가", "누구인지 알려", "누구인지 보여"
+        ]
+        # TOP N 크리에이터 쿼리인 경우 기본적으로 이름 포함
+        # (creator_no만 보여주는 것은 사용자 친화적이지 않음)
+        if any(kw in query_lower for kw in ["top", "상위", "top3", "top 3", "top5", "top 5"]):
+            if any(kw in query_lower for kw in ["크리에이터", "creator", "매출", "sales", "회원", "member"]):
+                return True
+        return any(pattern in query_lower for pattern in name_request_patterns)
 
 
 class NLProcessor(BaseNode):
@@ -327,6 +395,34 @@ class NLProcessor(BaseNode):
             # 이미 data_summarization으로 라우팅되므로 nl_processing 노드에는 도달하지 않음
             # 따라서 여기서 도달하는 intent는 데이터 의도(SIMPLE_AGGREGATION, COMPLEX_ANALYSIS)만 처리
             
+            # 하이브리드 접근: 이전 쿼리 결과 캐시 확인 및 재사용 판단
+            resolved_context = self._check_query_result_cache(state, user_query, intent)
+            if resolved_context:
+                state["resolved_context"] = resolved_context
+                if resolved_context.get("reusable_result"):
+                    # 이전 결과를 재사용할 수 있는 경우
+                    self.logger.info(f"Found reusable result in cache: {resolved_context.get('previous_query_key')}")
+                    # SQL/Python 생성 건너뛰기
+                    state["skip_sql_generation"] = True
+                    # 캐시에서 결과와 요약 복원
+                    cache_key = resolved_context.get("previous_query_key")
+                    cache = state.get("query_result_cache", {})
+                    if cache_key in cache:
+                        cached_data = cache[cache_key]
+                        state["query_result"] = cached_data.get("result", [])
+                        state["data_summary"] = cached_data.get("data_summary")
+                        # Python 코드가 있는 경우 (COMPLEX_ANALYSIS)
+                        if cached_data.get("python_code"):
+                            state["python_code"] = cached_data["python_code"]
+                            state["python_execution_result"] = {
+                                "success": True,
+                                "result": cached_data.get("result", []),
+                                "execution_time": 0.0
+                            }
+                        state["success"] = True
+                        self.logger.info(f"Reusing cached result for query: {user_query[:50]}...")
+                        return state
+            
             # 스키마 정보 요청 처리 (SHOW/DESCRIBE 대안)
             # 이는 데이터 의도이지만 특별한 처리가 필요할 수 있음
             schema_info_response = self.fanding_templates.get_schema_info(user_query)
@@ -387,21 +483,184 @@ class NLProcessor(BaseNode):
         
         return state
     
-    def _handle_greeting(self, user_query: str) -> str:
-        """인사말 처리 (랜덤 응답)"""
-        return generate_greeting_response(user_query)
-    
-    def _handle_help_request(self, user_query: str) -> str:
-        """도움말 요청 처리"""
-        return generate_help_response(user_query)
-    
-    def _handle_general_chat(self, user_query: str) -> str:
-        """일반 대화 처리 (랜덤 응답)"""
-        return generate_general_chat_response(user_query)
-    
     def _generate_error_response(self, error: Exception) -> str:
         """사용자 친화적인 에러 응답 생성"""
         return generate_error_response(error)
+    
+    def _check_query_result_cache(
+        self, 
+        state: GraphState, 
+        user_query: str, 
+        intent: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        이전 쿼리 결과 캐시를 확인하고 재사용 가능 여부 판단 (하이브리드 접근)
+        
+        Args:
+            state: 현재 상태
+            user_query: 사용자 쿼리
+            intent: 인텐트
+            
+        Returns:
+            resolved_context 딕셔너리 또는 None
+        """
+        try:
+            import re
+            from datetime import datetime, timedelta
+            
+            cache = state.get("query_result_cache", {})
+            if not cache:
+                self.logger.debug(f"No cache found in state for query: {user_query[:50]}...")
+                return None
+            
+            self.logger.debug(f"Checking cache with {len(cache)} entries for query: {user_query[:50]}...")
+            query_lower = user_query.lower()
+            
+            # 재질의 키워드 확인 (예: "알려줬었", "말했었", "이미", "방금")
+            is_rerun_query = any(kw in query_lower for kw in [
+                "알려줬", "알려줬었", "말했", "말했었", "이미", "방금", "아까", "전에"
+            ])
+            
+            # 캐시에서 매칭되는 쿼리 찾기
+            best_match = None
+            best_match_score = 0.0
+            
+            for cache_key, cached_data in cache.items():
+                cached_query = cached_data.get("query", "")
+                cached_intent = cached_data.get("intent", "")
+                cached_timestamp = cached_data.get("timestamp", "")
+                
+                # 인텐트가 일치해야 함
+                if cached_intent != intent:
+                    continue
+                
+                # 재질의가 아닌 경우: 쿼리 패턴 매칭
+                if not is_rerun_query:
+                    # 쿼리 패턴 기반 매칭 (날짜, TOP N, 키워드 등)
+                    match_score = self._calculate_query_similarity(user_query, cached_query)
+                    if match_score > 0.7 and match_score > best_match_score:
+                        best_match_score = match_score
+                        best_match = {
+                            "previous_query_key": cache_key,
+                            "reusable_result": True,
+                            "match_confidence": match_score,
+                            "previous_answer": cached_data.get("data_summary"),
+                            "extracted_params": cached_data.get("params", {})
+                        }
+                else:
+                    # 재질의인 경우: 최근 캐시 우선
+                    if cached_timestamp:
+                        try:
+                            cached_time = datetime.fromisoformat(cached_timestamp.replace('Z', '+00:00'))
+                            time_diff = (datetime.now() - cached_time.replace(tzinfo=None)).total_seconds()
+                            # 1시간 이내의 캐시만 고려
+                            if time_diff < 3600:
+                                match_score = 0.9  # 재질의는 높은 신뢰도
+                                if match_score > best_match_score:
+                                    best_match_score = match_score
+                                    best_match = {
+                                        "previous_query_key": cache_key,
+                                        "reusable_result": True,
+                                        "match_confidence": match_score,
+                                        "previous_answer": cached_data.get("data_summary"),
+                                        "extracted_params": cached_data.get("params", {})
+                                    }
+                        except Exception:
+                            pass
+            
+            if best_match:
+                self.logger.info(
+                    f"Found matching cache entry: {best_match['previous_query_key']} "
+                    f"(confidence: {best_match['match_confidence']:.2f})"
+                )
+            else:
+                self.logger.debug(f"No matching cache entry found for query: {user_query[:50]}... (checked {len(cache)} entries)")
+            
+            return best_match
+            
+        except Exception as e:
+            self.logger.warning(f"Error checking query result cache: {e}")
+            return None
+    
+    def _calculate_query_similarity(self, query1: str, query2: str) -> float:
+        """
+        두 쿼리의 유사도 계산 (패턴 기반)
+        
+        Args:
+            query1: 첫 번째 쿼리
+            query2: 두 번째 쿼리
+            
+        Returns:
+            유사도 점수 (0.0 ~ 1.0)
+        """
+        try:
+            import re
+            from difflib import SequenceMatcher
+            
+            q1_lower = query1.lower()
+            q2_lower = query2.lower()
+            
+            # 패턴 추출
+            patterns1 = self._extract_query_patterns(q1_lower)
+            patterns2 = self._extract_query_patterns(q2_lower)
+            
+            # 패턴 유사도 계산
+            pattern_score = 0.0
+            if patterns1 and patterns2:
+                common_patterns = set(patterns1) & set(patterns2)
+                total_patterns = set(patterns1) | set(patterns2)
+                if total_patterns:
+                    pattern_score = len(common_patterns) / len(total_patterns)
+            
+            # 텍스트 유사도 계산
+            text_similarity = SequenceMatcher(None, q1_lower, q2_lower).ratio()
+            
+            # 가중 평균 (패턴 70%, 텍스트 30%)
+            similarity = pattern_score * 0.7 + text_similarity * 0.3
+            
+            return similarity
+            
+        except Exception:
+            return 0.0
+    
+    def _extract_query_patterns(self, query: str) -> List[str]:
+        """
+        쿼리에서 패턴 추출 (날짜, TOP N, 키워드 등)
+        
+        Args:
+            query: 쿼리 문자열
+            
+        Returns:
+            패턴 리스트
+        """
+        import re
+        patterns = []
+        
+        # 월/년 추출
+        month_match = re.search(r'(\d+)\s*월', query)
+        if month_match:
+            patterns.append(f"month_{month_match.group(1)}")
+        
+        year_match = re.search(r'(\d+)\s*년', query)
+        if year_match:
+            patterns.append(f"year_{year_match.group(1)}")
+        
+        # TOP N 추출
+        top_match = re.search(r'top\s*(\d+)', query) or re.search(r'(\d+)\s*위', query)
+        if top_match:
+            patterns.append(f"top_{top_match.group(1)}")
+        
+        # 키워드 추출
+        keywords = []
+        if any(kw in query for kw in ["매출", "sales", "정산", "정산금액", "결제", "수익", "매출액", "금액", "수익금", "revenue", "payment", "settlement"]):
+            keywords.append("sales")
+        if "신규" in query or "new" in query:
+            keywords.append("new_members")
+        if "크리에이터" in query or "creator" in query:
+            keywords.append("creator")
+        
+        patterns.extend(keywords)
+        return patterns
     
     def _handle_data_query(self, state: GraphState, user_query: str) -> None:
         """데이터 조회 의도 처리 (RAG + 동적 스키마 확장 통합)"""
@@ -434,17 +693,25 @@ class NLProcessor(BaseNode):
         
         if not fanding_template:
             # 3. 동적 월별 템플릿 생성 시도 (멤버십 성과 관련)
-            try:
-                dynamic_template = self.fanding_templates.create_dynamic_monthly_template(user_query)
-                if dynamic_template:
-                    self.logger.info(f"Dynamic monthly template created: {dynamic_template.name}")
-                    set_fanding_template(state, dynamic_template)
-                    state["skip_sql_generation"] = False
-                    state["success"] = True  # 동적 템플릿 생성 성공
-                    self.logger.info(f"Dynamic SQL applied: {dynamic_template.sql_template[:100]}...")
-                    return
-            except Exception as e:
-                self.logger.warning(f"Dynamic monthly template creation failed: {str(e)}")
+            # 단, 이탈/churn 키워드가 있으면 동적 템플릿 생성하지 않음 (기존 템플릿 사용)
+            query_lower = user_query.lower()
+            has_churn_keywords = any(keyword in query_lower for keyword in [
+                '이탈', '탈퇴', 'churn', '취소', '중단', '해지', '이탈자', '탈퇴자', '이탈 회원', '탈퇴 회원'
+            ])
+            if not has_churn_keywords:
+                try:
+                    dynamic_template = self.fanding_templates.create_dynamic_monthly_template(user_query)
+                    if dynamic_template:
+                        self.logger.info(f"Dynamic monthly template created: {dynamic_template.name}")
+                        set_fanding_template(state, dynamic_template)
+                        state["skip_sql_generation"] = False
+                        state["success"] = True  # 동적 템플릿 생성 성공
+                        self.logger.info(f"Dynamic SQL applied: {dynamic_template.sql_template[:100]}...")
+                        return
+                except Exception as e:
+                    self.logger.warning(f"Dynamic monthly template creation failed: {str(e)}")
+            else:
+                self.logger.info("이탈 회원 관련 쿼리는 동적 템플릿을 생성하지 않습니다. 기존 템플릿 매칭을 시도합니다.")
             
             # 4. 모든 방법 실패 시 일반 SQL 생성으로 진행
             self.logger.info("No template/pattern matched, proceeding with general SQL generation")
@@ -468,6 +735,13 @@ class NLProcessor(BaseNode):
     def _extract_intent_and_entities(self, query: str, llm_intent_result: Optional[Dict] = None) -> Tuple[QueryIntent, List[Entity]]:
         """Extract intent and entities from the query."""
         
+        # 0. 복잡 분석 키워드 체크 (LLM 결과보다 우선)
+        # 복잡 분석 키워드가 있으면 무조건 COMPLEX_ANALYSIS로 분류
+        if self._has_complex_analysis_keywords(query):
+            self.logger.info(f"Complex analysis keywords detected, classifying as COMPLEX_ANALYSIS: {query}")
+            entities = self._extract_entities_from_query(query)
+            return QueryIntent.COMPLEX_ANALYSIS, entities
+        
         # 1. LLM 분류 결과가 있으면 우선 사용 (MEDIUM 임계값 0.6 사용)
         # MEDIUM 임계값: LLM 분류가 상당히 확실할 때만 사용하여 오분류 방지
         if llm_intent_result and llm_intent_result.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD_MEDIUM:
@@ -480,7 +754,20 @@ class NLProcessor(BaseNode):
             except ValueError:
                 self.logger.warning(f"Invalid LLM intent: {llm_intent_result.get('intent')}")
         
-        # 2. LLM 분류 결과가 있으면 참고 (LOW 임계값 0.3 사용)
+        # 2. LLM 분류 결과가 COMPLEX_ANALYSIS면 confidence가 낮아도 우선 사용
+        # COMPLEX_ANALYSIS는 LLM이 잘못 분류할 가능성이 높으므로, LLM이 COMPLEX_ANALYSIS로 분류했다면 신뢰
+        if llm_intent_result:
+            try:
+                llm_intent_str = llm_intent_result.get("intent", "")
+                if isinstance(llm_intent_str, str) and llm_intent_str.upper() == QueryIntent.COMPLEX_ANALYSIS.value:
+                    llm_intent = QueryIntent.COMPLEX_ANALYSIS
+                    self.logger.info(f"Using LLM COMPLEX_ANALYSIS classification (priority override): {query}")
+                    entities = self._extract_entities_from_query(query)
+                    return llm_intent, entities
+            except (ValueError, AttributeError):
+                pass
+        
+        # 3. LLM 분류 결과가 있으면 참고 (LOW 임계값 0.3 사용)
         # LOW 임계값: LLM이 불확실해도 규칙 기반보다는 나을 수 있으므로 최소한의 신뢰도로 참고
         if llm_intent_result and llm_intent_result.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD_LOW:
             try:
@@ -491,7 +778,7 @@ class NLProcessor(BaseNode):
             except ValueError:
                 pass
         
-        # 3. 데이터 조회 의도가 있는 경우 처리 (LLM 실패 시 fallback)
+        # 4. 데이터 조회 의도가 있는 경우 처리 (LLM 실패 시 fallback)
         if self._has_data_query_indicators(query):
             # 데이터 조회 의도가 있으면 SIMPLE_AGGREGATION으로 분류 (LLM 실패해도)
             # 불명확한 경우 기본값으로 SIMPLE_AGGREGATION 사용 (SQL이 더 안전)
@@ -540,6 +827,14 @@ class NLProcessor(BaseNode):
         if any(keyword in query_lower for keyword in STATISTICS_KEYWORDS):
             entities.append(Entity(name="statistics", type="aggregation", confidence=0.8))
         
+        # 결제/매출 관련 키워드
+        if any(keyword in query_lower for keyword in PAYMENT_KEYWORDS):
+            entities.append(Entity(name="payment", type="table", confidence=0.9))
+            # 매출 관련 테이블들을 명시적으로 추가
+            # t_payment, t_fanding_log, t_fanding이 매출 관련 정보를 포함
+            entities.append(Entity(name="t_payment", type="table", confidence=0.85))
+            entities.append(Entity(name="t_fanding_log", type="table", confidence=0.8))
+        
         return entities
     
     def _classify_intent_by_rules(self, query: str) -> QueryIntent:
@@ -580,9 +875,52 @@ class NLProcessor(BaseNode):
         # 6. 기본값: 일반 대화로 분류 (UNKNOWN 대신)
         return QueryIntent.GENERAL_CHAT
     
+    def _has_complex_analysis_keywords(self, query: str) -> bool:
+        """복잡한 분석이 필요한 키워드가 있는지 확인"""
+        query_lower = query.lower()
+        
+        # 복잡 분석 키워드 (COMPLEX_ANALYSIS로 분류해야 함)
+        # 주의: 너무 광범위한 키워드("모두", "모든" 등)는 맥락 의존적이므로 제외
+        complex_keywords = [
+            "비교", "비교해서", "비교해", "대비", "대조",
+            "성장률", "증가율", "감소율", "변화율", "변화", "추이",
+            "트렌드", "트렌드 분석", "분석", "상관관계", "상관",
+            "비율", "교집합", "합집합", "차집합",
+            "성장", "증가", "감소", "증감",
+            "증가한", "감소한", "변화한", "변동",
+            "중에서", "중에", "그 중", "그중",
+            # "모두", "모든", "각각" 제거 - 너무 광범위함
+            # "평균" 제거 - 단순 집계에도 사용됨
+            "회귀",
+            "통계적", "통계 분석"
+        ]
+        
+        import re
+        
+        # 키워드 체크
+        if any(keyword in query_lower for keyword in complex_keywords):
+            return True
+        
+        # 패턴 체크 (한국어 문맥 고려)
+        # "모두", "각각" 같은 키워드는 데이터 관련 맥락에서만 복잡 분석으로 간주
+        if "모두" in query_lower or "각각" in query_lower:
+            # 데이터 관련 키워드와 함께 사용되는 경우만 복잡 분석으로 간주
+            data_context_keywords = ["회원", "매출", "데이터", "정보", "수", "통계", "결과", "값", "이탈", "신규"]
+            if any(keyword in query_lower for keyword in data_context_keywords):
+                # "A와 B를 모두" 또는 "A와 B 모두" 패턴 체크
+                # 정규식 패턴: 앞에 단어가 있고, "와" 또는 "과", 그리고 또 다른 단어가 있고, "를" 또는 없고, "모두" 또는 "각각"
+                if re.search(r"\w+\s+(?:와|과)\s+\w+\s*(?:를|을)?\s*(?:모두|각각)", query_lower):
+                    return True
+        
+        return False
+    
     def _has_data_query_indicators(self, query: str) -> bool:
         """데이터 조회 의도가 있는지 확인"""
         query_lower = query.lower()
+        
+        # 복잡 분석 키워드가 있으면 여기서는 제외 (위에서 이미 처리됨)
+        if self._has_complex_analysis_keywords(query):
+            return False
         
         # 데이터 조회 키워드 (더 구체적으로 수정)
         data_keywords = [
@@ -590,7 +928,7 @@ class NLProcessor(BaseNode):
             "사용자", "회원", "크리에이터", "펀딩", "프로젝트", "주문",
             "개수", "수", "합계", "평균", "최대", "최소", "통계",
             "멤버십", "성과", "매출", "방문자", "리텐션", "포스트",
-            "조회수", "인기", "분석", "리포트", "월간", "일간", "주간", "년간",
+            "조회수", "인기", "리포트", "월간", "일간", "주간", "년간",
             # 추가 키워드
             "뽑아줘", "뽑아", "추출", "선택", "고르", "정렬", "순위",
             "top", "top5", "top10", "상위", "최고", "많은", "적은",
@@ -799,8 +1137,22 @@ class SQLGenerationNode(BaseNode):
         # LLM 서비스에서 SQL LLM 가져오기
         self.llm = self._get_sql_llm()
         
+        # FandingSQLTemplates를 먼저 초기화 (SQLPromptTemplate에서 사용하기 위해)
+        # config에서 공유하거나 새로 생성 (중복 초기화 방지)
+        if "fanding_templates" in config:
+            self.fanding_templates = config["fanding_templates"]
+            self.logger.debug("Using shared FandingSQLTemplates from config")
+        else:
+            # db_schema는 부모 클래스에서 이미 로드됨 (없으면 자동 로드)
+            self.fanding_templates = FandingSQLTemplates(db_schema=getattr(self, 'db_schema', None))
+            config["fanding_templates"] = self.fanding_templates  # 다른 노드에서 재사용할 수 있도록 config에 저장
+        
         # SQLPromptTemplate 초기화 (RAG 컨텍스트 기반 복잡한 쿼리용)
-        self.prompt_template = SQLPromptTemplate(db_schema=self.db_schema)
+        # fanding_templates를 전달하여 실제 사용되는 템플릿을 LLM 예제로 변환
+        self.prompt_template = SQLPromptTemplate(
+            db_schema=self.db_schema,
+            fanding_templates=self.fanding_templates
+        )
         
         # DynamicSQLGenerator 통합: Few-shot 예제 기반 빠른 경로용 프롬프트
         self.simple_prompt = ChatPromptTemplate.from_messages([
@@ -819,15 +1171,6 @@ JSON 형식으로만 응답:
         
         # JSON 파서 초기화 (Few-shot 경로용)
         self.json_parser = SimpleJsonOutputParser()
-        
-        # FandingSQLTemplates를 config에서 공유하거나 새로 생성 (중복 초기화 방지)
-        if "fanding_templates" in config:
-            self.fanding_templates = config["fanding_templates"]
-            self.logger.debug("Using shared FandingSQLTemplates from config")
-        else:
-            # db_schema는 부모 클래스에서 이미 로드됨 (없으면 자동 로드)
-            self.fanding_templates = FandingSQLTemplates(db_schema=getattr(self, 'db_schema', None))
-            config["fanding_templates"] = self.fanding_templates  # 다른 노드에서 재사용할 수 있도록 config에 저장
     
     def process(self, state: GraphState) -> GraphState:
         """자연어 쿼리를 SQL로 변환"""
@@ -843,23 +1186,23 @@ JSON 형식으로만 응답:
             self.logger.info(f"SQLGenerationNode - conversation_response: {conversation_response is not None}")
             self.logger.info(f"SQLGenerationNode - intent: {intent}")
             
-            # # 대화 인텐트인 경우 SQL 생성 건너뛰기
-            # if (skip_flag or conversation_response or 
-            #     intent in ["GREETING", "GENERAL_CHAT", "HELP_REQUEST"]):
-            #     # 명확화 질문 또는 대화 의도인지 확인
-            #     if state.get("conversation_response") and "어떤" in str(state.get("conversation_response", "")):
-            #         self.logger.info("Skipping SQL generation - clarification question detected")
-            #     else:
-            #         self.logger.info("Skipping SQL generation for conversation intent")
-            #     state["sql_query"] = None
-            #     state["validated_sql"] = None
-            #     state["confidence_scores"]["sql_generation"] = 1.0
-            #     return state
+       
             
             user_query = state["user_query"]
             schema_mapping = state.get("schema_mapping")
             entities = state.get("entities", [])
             rag_schema_context = state.get("rag_schema_context", "")
+            
+            # 대화 히스토리에서 파라미터 추출 (예: creator_no)
+            conversation_history = state.get("conversation_history", [])
+            if conversation_history and ("creator_no" in user_query.lower() or "creator_no말고" in user_query.lower()):
+                creator_no = self._extract_creator_no_from_history(conversation_history, user_query)
+                if creator_no:
+                    # SQL 파라미터에 추가
+                    if "sql_params" not in state:
+                        state["sql_params"] = {}
+                    state["sql_params"]["creator_no"] = creator_no
+                    self.logger.info(f"Extracted creator_no={creator_no} from conversation history")
             
             # 누적 슬롯 병합 (이전 state + 현재 질의)
             prior_slots = state.get("slots") or {}
@@ -874,59 +1217,88 @@ JSON 형식으로만 응답:
             # 1. NLProcessor에서 이미 매칭된 fanding_template 확인 (최우선)
             # NLProcessor에서 템플릿 매칭을 이미 수행했으므로 이를 우선 활용
             # 단, 크리에이터 정보가 필요한 쿼리인데 템플릿에 크리에이터 필터링이 없는 경우는 일반 SQL 생성으로 진행
+            # 템플릿 매칭 점수 검증 추가 (1단계: 신뢰도 검증)
             fanding_template = state.get("fanding_template")
             if fanding_template:
                 # 템플릿 객체에서 SQL 추출
                 sql_template = None
+                match_score = None
                 if hasattr(fanding_template, 'sql_template'):
                     sql_template = fanding_template.sql_template
                     template_name = fanding_template.name
+                    match_score = getattr(fanding_template, 'match_score', None)
                 elif isinstance(fanding_template, dict):
                     sql_template = fanding_template.get("sql_template")
                     template_name = fanding_template.get("name", "unknown")
+                    match_score = fanding_template.get("match_score")
+                
+                
+                if match_score is not None and match_score < TEMPLATE_MATCH_THRESHOLD:
+                    self.logger.info(
+                        f"Fanding template '{template_name}' matched but score ({match_score:.2f}) "
+                        f"is below threshold ({TEMPLATE_MATCH_THRESHOLD:.2f}). "
+                        f"Skipping template, will use LLM-based SQL generation."
+                    )
+                    # 템플릿을 None으로 설정하여 LLM 기반 SQL 생성으로 진행
+                    fanding_template = None
+                    sql_template = None
                 
                 if sql_template:
-                    # 크리에이터 정보가 필요한 쿼리인지 확인
-                    creator_name = self._extract_creator_name(user_query)
-                    if creator_name:
-                        # 크리에이터 정보가 필요한데 템플릿에 크리에이터 필터링이 없는 경우
-                        if 'creator' not in sql_template.lower() and 'creator_no' not in sql_template:
-                            self.logger.info(f"Fanding template '{template_name}' matched but missing creator filter. Extracting creator info and adding to template.")
-                            # 크리에이터 정보 추출 및 추가
-                            creator_info = self._find_creator_by_name(creator_name)
-                            if creator_info:
-                                # db_schema를 기반으로 실제 테이블과 컬럼 찾기 (하드코딩 제거)
-                                creator_col = self._find_creator_column_in_sql_template(sql_template, state)
-                                
-                                if creator_col:
-                                    # 템플릿 SQL에 크리에이터 필터 추가
-                                    # WHERE 절이 있으면 AND로 추가, 없으면 WHERE 추가
-                                    if 'WHERE' in sql_template.upper():
-                                        # 기존 WHERE 절에 AND 추가
-                                        sql_template = sql_template.rstrip(';').rstrip() + f" AND {creator_col} = :creator_no"
-                                    else:
-                                        # WHERE 절 추가
-                                        sql_template = sql_template.rstrip(';').rstrip() + f" WHERE {creator_col} = :creator_no"
-                                    
-                                    # SQL 파라미터 설정
-                                    if "sql_params" not in state:
-                                        state["sql_params"] = {}
-                                    state["sql_params"]["creator_no"] = creator_info["creator_no"]
-                                    
-                                    self.logger.info(f"Added creator filter to template: {creator_col} = {creator_info['creator_no']} (creator: '{creator_name}')")
-                                else:
-                                    self.logger.warning(f"Could not find creator column in SQL template using db_schema, using template as-is")
-                            else:
-                                self.logger.warning(f"Creator '{creator_name}' not found in database, using template as-is")
-                        else:
-                            # 템플릿에 이미 크리에이터 필터링이 있는 경우
-                            self.logger.info(f"Fanding template '{template_name}' already includes creator filter")
+                    # 2단계: 템플릿 SQL과 쿼리 의도 일치 검증
+                    if not self._validate_template_intent_match(user_query, sql_template):
+                        self.logger.info(
+                            f"Fanding template '{template_name}' matched but SQL does not match query intent. "
+                            f"Skipping template, will use LLM-based SQL generation."
+                        )
+                        # 템플릿을 None으로 설정하여 LLM 기반 SQL 생성으로 진행
+                        fanding_template = None
+                        sql_template = None
+                        # state에서도 명시적으로 제거
+                        state = clear_sql_generation(state)
+                        # continue to LLM-based SQL generation
                     
-                    self.logger.info(f"Using fanding_template matched by NLProcessor: {template_name}")
-                    state["sql_query"] = sql_template
-                    state["confidence_scores"]["sql_generation"] = 0.9  # 템플릿 매칭은 높은 신뢰도
-                    self.logger.info(f"SQL from NLProcessor-matched template: {sql_template[:100]}...")
-                    return state
+                    if sql_template:
+                        # 크리에이터 정보가 필요한 쿼리인지 확인
+                        creator_name = self._extract_creator_name(user_query)
+                        if creator_name:
+                            # 크리에이터 정보가 필요한데 템플릿에 크리에이터 필터링이 없는 경우
+                            if 'creator' not in sql_template.lower() and 'creator_no' not in sql_template:
+                                self.logger.info(f"Fanding template '{template_name}' matched but missing creator filter. Extracting creator info and adding to template.")
+                                # 크리에이터 정보 추출 및 추가
+                                creator_info = self._find_creator_by_name(creator_name)
+                                if creator_info:
+                                    # db_schema를 기반으로 실제 테이블과 컬럼 찾기 (하드코딩 제거)
+                                    creator_col = self._find_creator_column_in_sql_template(sql_template, state)
+                                    
+                                    if creator_col:
+                                        # 템플릿 SQL에 크리에이터 필터 추가
+                                        # WHERE 절이 있으면 AND로 추가, 없으면 WHERE 추가
+                                        if 'WHERE' in sql_template.upper():
+                                            # 기존 WHERE 절에 AND 추가
+                                            sql_template = sql_template.rstrip(';').rstrip() + f" AND {creator_col} = :creator_no"
+                                        else:
+                                            # WHERE 절 추가
+                                            sql_template = sql_template.rstrip(';').rstrip() + f" WHERE {creator_col} = :creator_no"
+                                        
+                                        # SQL 파라미터 설정
+                                        if "sql_params" not in state:
+                                            state["sql_params"] = {}
+                                        state["sql_params"]["creator_no"] = creator_info["creator_no"]
+                                        
+                                        self.logger.info(f"Added creator filter to template: {creator_col} = {creator_info['creator_no']} (creator: '{creator_name}')")
+                                    else:
+                                        self.logger.warning(f"Could not find creator column in SQL template using db_schema, using template as-is")
+                                else:
+                                    self.logger.warning(f"Creator '{creator_name}' not found in database, using template as-is")
+                            else:
+                                # 템플릿에 이미 크리에이터 필터링이 있는 경우
+                                self.logger.info(f"Fanding template '{template_name}' already includes creator filter")
+                        
+                        self.logger.info(f"Using fanding_template matched by NLProcessor: {template_name}")
+                        state["sql_query"] = sql_template
+                        state["confidence_scores"]["sql_generation"] = 0.9  # 템플릿 매칭은 높은 신뢰도
+                        self.logger.info(f"SQL from NLProcessor-matched template: {sql_template[:100]}...")
+                return state
             
             # 2. 기존 dynamic_sql_result가 있으면 우선 사용 (하위 호환성)
             dynamic_sql_result = state.get("dynamic_sql_result")
@@ -938,19 +1310,19 @@ JSON 형식으로만 응답:
                     state["confidence_scores"]["sql_generation"] = dynamic_confidence
                 return state
             
-            # 3. RAG 매핑 결과 확인 - 신뢰도 임계값 낮춤
-            rag_result = state.get("rag_mapping_result")
-            # RAG 임계값(0.6) 사용: RAG 매핑 결과는 중간 수준의 신뢰도로도 사용 가능
-            if rag_result and rag_result.confidence > RAG_CONFIDENCE_THRESHOLD:
-                self.logger.info(f"Using RAG mapping result: {rag_result.source.value} (confidence: {rag_result.confidence:.2f})")
-                set_sql_result(state, rag_result.sql_template, rag_result.confidence)
-                return state
-            
-            # 2.5 슬롯 기반 결정적 빌드 (누적 슬롯 사용)
+            # 3. 슬롯 기반 결정적 빌드 (누적 슬롯 사용)
             slots = state.get("slots") or {}
             # intent 추론 보강: metric이 active_members이고 creator/top_k/월이 존재하면 active_members용 intent
             if (slots.get("group_by") == "creator" or ("크리에이터" in user_query)) and slots.get("top_k") and slots.get("month"):
-                metric = slots.get("metric") or ("active_members" if ("활성" in user_query) else "new_members")
+                # metric 결정: 매출 우선, 그 다음 활성, 기본값은 신규 회원
+                query_lower = user_query.lower()
+                if any(kw in query_lower for kw in PAYMENT_KEYWORDS):
+                    metric = "sales"
+                elif "활성" in query_lower or "active" in query_lower:
+                    metric = "active_members"
+                else:
+                    metric = slots.get("metric") or "new_members"
+                
                 # 누적 반영
                 slots["metric"] = metric
                 state["slots"] = slots
@@ -971,20 +1343,69 @@ JSON 형식으로만 응답:
                 
                 creator_col = self._guess_creator_column(state)
                 if creator_col:
-                    if metric == "active_members":
+                    if metric == "sales":
+                        # 매출 쿼리: v_creator_daily_net_sales 또는 t_payment 사용
+                        # 크리에이터 이름이 요청되었는지 확인
+                        should_include_creator_name = self._should_include_creator_name(user_query)
+                        
+                        if creator_info:
+                            # 특정 크리에이터의 매출
+                            sql = (
+                                "SELECT v.seller_creator_no AS creator_no, "
+                                + ("cm.nickname AS creator_name, " if should_include_creator_name else "")
+                                + "SUM(v.converted_net_price_sum) AS total_sales "
+                                "FROM v_creator_daily_net_sales v "
+                                + ("INNER JOIN t_creator c ON v.seller_creator_no = c.no "
+                                   "INNER JOIN t_member cm ON c.member_no = cm.no " if should_include_creator_name else "")
+                                + "WHERE DATE_FORMAT(v.sales_date, '%Y-%m') = :month "
+                                "AND v.seller_creator_no = :creator_no "
+                                "GROUP BY v.seller_creator_no" + (", cm.nickname" if should_include_creator_name else "") + " "
+                                "ORDER BY total_sales DESC LIMIT :limit_k"
+                            )
+                            if "sql_params" not in state:
+                                state["sql_params"] = {}
+                            state["sql_params"] = {
+                                "creator_no": creator_info["creator_no"],
+                                "month": month,
+                                "limit_k": k
+                            }
+                        else:
+                            # TOP N 크리에이터 매출 (이름 포함 여부는 선택)
+                            sql = (
+                                "SELECT v.seller_creator_no AS creator_no, "
+                                + ("cm.nickname AS creator_name, " if should_include_creator_name else "")
+                                + "SUM(v.converted_net_price_sum) AS total_sales "
+                                "FROM v_creator_daily_net_sales v "
+                                + ("INNER JOIN t_creator c ON v.seller_creator_no = c.no "
+                                   "INNER JOIN t_member cm ON c.member_no = cm.no " if should_include_creator_name else "")
+                                + "WHERE DATE_FORMAT(v.sales_date, '%Y-%m') = :month "
+                                "GROUP BY v.seller_creator_no" + (", cm.nickname" if should_include_creator_name else "") + " "
+                                "ORDER BY total_sales DESC LIMIT :limit_k"
+                            )
+                            if "sql_params" not in state:
+                                state["sql_params"] = {}
+                            state["sql_params"] = {
+                                "month": month,
+                                "limit_k": k
+                            }
+                        state["sql_query"] = sql
+                        state["confidence_scores"]["sql_generation"] = 0.85
+                        self.logger.info(f"Built deterministic SQL for sales query (month: {month}, top_k: {k}, include_name: {should_include_creator_name})")
+                        return state
+                    elif metric == "active_members":
                         # t_member에는 creator_no가 없으므로 t_fanding을 JOIN해야 함
                         # data_dictionary.md 기준: t_fanding.fanding_status = 'T' (활성 멤버십)
                         if creator_info:
                             # 구체적인 크리에이터명이 있고 매칭된 경우: creator_no를 직접 사용 (SQL Injection 방지)
                             # 파라미터 바인딩을 위해 SQL 쿼리에 파라미터 플레이스홀더 사용
                             sql = (
-                                    "SELECT f.{creator_col}, cm.nickname AS creator_name, COUNT(DISTINCT f.member_no) AS active_members "
-                                    "FROM t_fanding f "
-                                    "INNER JOIN t_member m ON f.member_no = m.no "
-                                    "INNER JOIN t_creator c ON f.{creator_col} = c.no "
-                                    "INNER JOIN t_member cm ON c.member_no = cm.no "
-                                    "WHERE f.fanding_status = 'T' AND m.status = 'A' AND f.{creator_col} = :creator_no "
-                                    "GROUP BY f.{creator_col}, cm.nickname ORDER BY active_members DESC LIMIT :limit_k"
+                                "SELECT f.{creator_col}, cm.nickname AS creator_name, COUNT(DISTINCT f.member_no) AS active_members "
+                                "FROM t_fanding f "
+                                "INNER JOIN t_member m ON f.member_no = m.no "
+                                "INNER JOIN t_creator c ON f.{creator_col} = c.no "
+                                "INNER JOIN t_member cm ON c.member_no = cm.no "
+                                "WHERE f.fanding_status = 'T' AND m.status = 'A' AND f.{creator_col} = :creator_no "
+                                "GROUP BY f.{creator_col}, cm.nickname ORDER BY active_members DESC LIMIT :limit_k"
                             ).format(creator_col=creator_col)
                             # SQL 파라미터를 state에 저장 (sql_execution 노드에서 사용)
                             if "sql_params" not in state:
@@ -1076,12 +1497,23 @@ JSON 형식으로만 응답:
             # 복잡성에 따라 SQL 생성 경로 선택
             if query_complexity == "simple":
                 # 간단한 쿼리: Few-shot 예제 기반 빠른 경로
-                self.logger.info("Using simple SQL generation path (Few-shot based)")
-                simple_result = self._generate_sql_simple(user_query)
+                # RAG 컨텍스트가 있으면 활용하여 더 정확한 SQL 생성
+                self.logger.info(f"Using simple SQL generation path (Few-shot based, RAG context: {'available' if rag_schema_context else 'not available'})")
+                simple_result = self._generate_sql_simple(user_query, rag_schema_context=rag_schema_context)
                 
                 if simple_result and simple_result.get("sql_query"):
                     sql_query = simple_result["sql_query"]
                     confidence = simple_result.get("confidence", 0.7)
+                    
+                    # SQL 생성 후 자동 보정: 이름 요청 시 nickname JOIN 추가
+                    sql_query = self._ensure_creator_name_in_sql(sql_query, user_query, state)
+                    
+                    # SQL 파라미터 바인딩: {param} 형태를 :param으로 변환
+                    sql_params = state.get("sql_params", {})
+                    if sql_params:
+                        for param_name, param_value in sql_params.items():
+                            # {param_name} 형태를 :param_name으로 변환
+                            sql_query = sql_query.replace(f"{{{param_name}}}", f":{param_name}")
                     
                     state["sql_query"] = sql_query
                     state["confidence_scores"]["sql_generation"] = confidence
@@ -1101,6 +1533,16 @@ JSON 형식으로만 응답:
                 complex_sql = self._generate_sql_complex(user_query, rag_schema_context, schema_mapping)
                 
                 if complex_sql:
+                    # SQL 생성 후 자동 보정: 이름 요청 시 nickname JOIN 추가
+                    complex_sql = self._ensure_creator_name_in_sql(complex_sql, user_query, state)
+                    
+                    # SQL 파라미터 바인딩: {param} 형태를 :param으로 변환
+                    sql_params = state.get("sql_params", {})
+                    if sql_params:
+                        for param_name, param_value in sql_params.items():
+                            # {param_name} 형태를 :param_name으로 변환
+                            complex_sql = complex_sql.replace(f"{{{param_name}}}", f":{param_name}")
+                    
                     state["sql_query"] = complex_sql
                     state["sql_generation_metadata"] = {
                         "model": self.llm.model if self.llm else "unknown",
@@ -1147,7 +1589,7 @@ JSON 형식으로만 응답:
         return calculate_sql_confidence(result, schema_mapping)
     
     def _extract_simple_slots(self, query: str) -> Dict[str, Any]:
-        """간단 슬롯 추출: month, top_k, intent(creator_topk_new_members)"""
+        """간단 슬롯 추출: month, top_k, metric, intent"""
         q = query.lower()
         month = DateUtils.get_analysis_month(query)
         # top-k
@@ -1155,11 +1597,27 @@ JSON 형식으로만 응답:
         m = re.search(r"top\s*(\d+)|상위\s*(\d+)", q)
         if m:
             top_k = int([g for g in m.groups() if g][0])
+        
+        # metric 추출 (매출, 신규 회원, 활성 회원 등)
+        metric = None
+        if any(kw in q for kw in PAYMENT_KEYWORDS):
+            metric = "sales"
+        elif "활성" in q or "active" in q:
+            metric = "active_members"
+        elif "신규" in q or "new" in q or ("회원" in q and "신규" not in q):
+            metric = "new_members"
+        
         # intent
         intent = None
-        if ("크리에이터" in q or "creator" in q) and ("top" in q or "상위" in q) and ("신규" in q or "회원" in q):
-            intent = "creator_topk_new_members"
-        return {"month": month, "top_k": top_k, "intent": intent}
+        if ("크리에이터" in q or "creator" in q) and ("top" in q or "상위" in q):
+            if metric == "sales":
+                intent = "creator_topk_sales"
+            elif metric == "new_members":
+                intent = "creator_topk_new_members"
+            elif metric == "active_members":
+                intent = "creator_topk_active_members"
+        
+        return {"month": month, "top_k": top_k, "metric": metric, "intent": intent}
     
     # _extract_creator_name은 BaseNode로 이동되었으므로 여기서는 제거됨
     
@@ -1503,12 +1961,14 @@ JSON 형식으로만 응답:
             # 애매한 경우: 기본적으로 simple로 처리 (빠른 경로 우선)
             return "simple"
     
-    def _generate_sql_simple(self, query: str) -> Optional[Dict[str, Any]]:
+    def _generate_sql_simple(self, query: str, rag_schema_context: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Few-shot 예제 기반 빠른 SQL 생성 (DynamicSQLGenerator 방식 통합)
+        RAG 컨텍스트가 있으면 활용하여 더 정확한 SQL 생성
         
         Args:
             query: 사용자 쿼리
+            rag_schema_context: RAG 검색 컨텍스트 (선택사항, 있으면 LLM 프롬프트에 포함)
             
         Returns:
             {"sql_query": str, "confidence": float, "reasoning": str} 또는 None
@@ -1518,31 +1978,95 @@ JSON 형식으로만 응답:
                 self.logger.warning("LLM not available for simple SQL generation")
                 return None
             
-            # Few-shot 프롬프트 생성
-            formatted_prompt = self.simple_prompt.format(query=query)
+            # 날짜 정보 추출 및 쿼리 보강 (방안 2: 명시적 날짜 전달)
+            enhanced_query = query
+            # 일자 정보도 포함한 날짜 추출 시도
+            date_info_with_day = DateUtils.extract_date_from_query(query)
+            if date_info_with_day:
+                year, month, day = date_info_with_day
+                from datetime import datetime
+                current_year = datetime.now().year
+                
+                if day:
+                    # 일자가 포함된 경우: "2025-11-01"
+                    enhanced_query = f"{query} (날짜: {year}년 {month}월 {day}일, 형식: {year}-{month:02d}-{day:02d})"
+                    self.logger.debug(f"Enhanced query with full date info: {year}년 {month}월 {day}일")
+                else:
+                    # 월만 있는 경우: "2025-11"
+                    if year == current_year:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Enhanced query with date info: {year}년 {month}월")
+                    else:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Query contains explicit year: {year}년 {month}월")
+            else:
+                # 날짜 추출 실패 시 기본 추출 시도 (월만)
+                date_info = DateUtils.extract_month_with_year_from_query(query)
+                if date_info:
+                    year, month = date_info
+                    from datetime import datetime
+                    current_year = datetime.now().year
+                    
+                    if year == current_year:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Enhanced query with date info: {year}년 {month}월")
+                    else:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Query contains explicit year: {year}년 {month}월")
+            
+            # SQLPromptTemplate을 사용하여 일관성 있는 프롬프트 생성
+            # JSON 형식 출력을 위해 커스텀 프롬프트 구성
+            if rag_schema_context:
+                # RAG 컨텍스트가 있는 경우: SQLPromptTemplate 기반으로 프롬프트 생성
+                # 하지만 JSON 형식 출력이 필요하므로 기본 스키마 정보와 RAG 컨텍스트를 결합
+                base_prompt = self.prompt_template.create_prompt(
+                    user_query=enhanced_query,  # 날짜 정보가 보강된 쿼리 사용
+                    include_relevant_examples=False,  # 빠른 경로이므로 예제는 제외
+                    rag_context=rag_schema_context
+                )
+                
+                # JSON 형식 출력을 요구하는 프롬프트로 변환
+                formatted_prompt = f"""{base_prompt}
+
+⚠️ 중요: 반드시 다음 JSON 형식으로만 응답하세요 (코드 블록 없이):
+{{
+    "sql_query": "SELECT ...",
+    "confidence": 0.9,
+    "reasoning": "이유"
+}}"""
+                self.logger.debug(f"Using SQLPromptTemplate with RAG context (length: {len(rag_schema_context)})")
+            else:
+                # RAG 컨텍스트가 없는 경우: 기존 Few-shot 프롬프트 사용
+                # (간단하고 빠른 경로이므로 self.simple_prompt 유지)
+                # 날짜 정보가 보강된 쿼리 사용
+                formatted_prompt = self.simple_prompt.format(query=enhanced_query)
+                self.logger.debug("Using simple prompt without RAG context")
             
             # LangChain 메시지 형식으로 변환
             messages = [HumanMessage(content=formatted_prompt)]
             
-            # LLM 호출
-            self.logger.debug(f"Calling LLM for simple SQL generation: {query[:50]}...")
+            # LLM 호출 (날짜 정보가 보강된 쿼리 사용)
+            self.logger.debug(f"Calling LLM for simple SQL generation: {enhanced_query[:50]}...")
             response = self.llm.invoke(messages)
             
             if not response:
                 self.logger.warning("LLM returned None response for simple SQL generation")
                 return None
             
-            # JSON 파싱
+            # JSON 파싱 (fallback_extract=True로 안전하게 처리)
             result_data = parse_json_response(response, parser=self.json_parser, fallback_extract=True)
             
             if not result_data:
                 self.logger.warning("Failed to parse JSON from simple SQL generation response")
                 return None
             
-            # 결과 추출
+            # 결과 추출 및 검증
             sql_query = str(result_data.get("sql_query", "")).strip()
             confidence = float(result_data.get("confidence", 0.7))
             reasoning = str(result_data.get("reasoning", "Few-shot 예제 기반 생성"))
+            
+            # SQL 쿼리에서 코드 블록 제거 (JSON 응답에 포함될 수 있음)
+            sql_query = self._extract_sql_from_text(sql_query)
             
             if not sql_query:
                 self.logger.warning("Empty SQL query from simple SQL generation")
@@ -1559,6 +2083,104 @@ JSON 형식으로만 응답:
         except Exception as e:
             self.logger.error(f"Error in simple SQL generation: {str(e)}", exc_info=True)
             return None
+    
+    def _validate_template_intent_match(self, user_query: str, sql_template: str) -> bool:
+        """
+        2단계: 템플릿 SQL과 쿼리 의도 일치 검증
+        
+        쿼리에서 핵심 키워드를 추출하고, 템플릿 SQL에 해당 키워드가 포함되어 있는지 확인합니다.
+        
+        Args:
+            user_query: 사용자 쿼리
+            sql_template: 템플릿 SQL 문자열
+            
+        Returns:
+            True: 템플릿 SQL이 쿼리 의도와 일치, False: 일치하지 않음
+        """
+        query_lower = user_query.lower()
+        sql_lower = sql_template.lower()
+        
+        # 쿼리 의도별 핵심 키워드 매핑
+        intent_keywords = {
+            "결제": {
+                "query_keywords": ["결제", "금액", "pay", "payment", "수익", "매출", "매출액", "revenue", "price", "remain_price"],
+                "sql_keywords": ["payment", "pay", "remain_price", "price", "revenue", "매출", "금액", "결제", "수익"]
+            },
+            "회원수": {
+                "query_keywords": ["회원", "회원수", "멤버", "member", "subscriber", "구독자"],
+                "sql_keywords": ["member", "member_no", "subscriber", "회원", "멤버"]
+            },
+            "신규회원": {
+                "query_keywords": ["신규", "신규회원", "신규멤버", "new", "new_member", "가입"],
+                "sql_keywords": ["new", "ins_datetime", "신규", "가입", "ins_"]
+            },
+            "활성회원": {
+                "query_keywords": ["활성", "활성회원", "활성멤버", "active", "active_member"],
+                "sql_keywords": ["active", "fanding_status", "활성", "status"]
+            },
+            "멤버십": {
+                "query_keywords": ["멤버십", "맴버쉽", "membership", "fanding", "팬딩"],
+                "sql_keywords": ["fanding", "membership", "멤버십", "t_fanding"]
+            },
+            "성과": {
+                "query_keywords": ["성과", "performance", "실적", "분석"],
+                "sql_keywords": ["performance", "revenue", "성과", "실적", "revenue_krw"]
+            }
+        }
+        
+        # 쿼리에서 발견된 의도들
+        detected_intents = []
+        for intent_name, keywords in intent_keywords.items():
+            query_keywords_found = [kw for kw in keywords["query_keywords"] if kw in query_lower]
+            if query_keywords_found:
+                detected_intents.append((intent_name, keywords["sql_keywords"]))
+        
+        # 의도가 발견되지 않으면 검증 통과 (일반적인 쿼리로 간주)
+        if not detected_intents:
+            self.logger.debug("No specific intent keywords found in query, template validation passed")
+            return True
+        
+        # 각 의도에 대해 SQL 템플릿에 해당 키워드가 있는지 확인
+        for intent_name, sql_keywords in detected_intents:
+            sql_keywords_found = [kw for kw in sql_keywords if kw in sql_lower]
+            if sql_keywords_found:
+                self.logger.debug(
+                    f"Template intent match validated: '{intent_name}' intent detected in query, "
+                    f"corresponding SQL keywords found: {sql_keywords_found}"
+                )
+                return True
+        
+        # 의도는 발견되었지만 SQL에 해당 키워드가 없는 경우
+        self.logger.warning(
+            f"Template intent mismatch: Query contains intent keywords but SQL template does not. "
+            f"Detected intents: {[intent for intent, _ in detected_intents]}, "
+            f"SQL template: {sql_template[:100]}..."
+        )
+        return False
+    
+    def _extract_sql_from_text(self, text: str) -> str:
+        """
+        텍스트에서 SQL 쿼리를 안전하게 추출 (정규식 사용)
+        
+        Args:
+            text: SQL 쿼리가 포함된 텍스트 (코드 블록 포함 가능)
+            
+        Returns:
+            추출된 SQL 쿼리 문자열
+        """
+        import re
+        
+        # ```sql ... ``` 패턴 또는 ``` ... ``` 패턴 찾기 (정규식 사용)
+        code_match = re.search(r'```(?:sql)?\s*([\s\S]*?)\s*```', text, re.IGNORECASE)
+        
+        if code_match:
+            # 코드 블록에서 SQL 추출
+            extracted_sql = code_match.group(1).strip()
+            self.logger.debug("Extracted SQL from code block")
+            return extracted_sql
+        else:
+            # 코드 블록이 없으면 전체 텍스트를 SQL로 간주 (마지막 수단)
+            return text.strip()
     
     def _generate_sql_complex(self, query: str, rag_context: Optional[str], schema_mapping: Optional[SchemaMapping]) -> Optional[str]:
         """
@@ -1577,6 +2199,42 @@ JSON 형식으로만 응답:
                 self.logger.warning("LLM not available for complex SQL generation")
                 return None
             
+            # 날짜 정보 추출 및 쿼리 보강 (방안 2: 명시적 날짜 전달)
+            enhanced_query = query
+            # 일자 정보도 포함한 날짜 추출 시도
+            date_info_with_day = DateUtils.extract_date_from_query(query)
+            if date_info_with_day:
+                year, month, day = date_info_with_day
+                from datetime import datetime
+                current_year = datetime.now().year
+                
+                if day:
+                    # 일자가 포함된 경우: "2025-11-01"
+                    enhanced_query = f"{query} (날짜: {year}년 {month}월 {day}일, 형식: {year}-{month:02d}-{day:02d})"
+                    self.logger.debug(f"Enhanced query with full date info: {year}년 {month}월 {day}일")
+                else:
+                    # 월만 있는 경우: "2025-11"
+                    if year == current_year:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Enhanced query with date info: {year}년 {month}월")
+                    else:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Query contains explicit year: {year}년 {month}월")
+            else:
+                # 날짜 추출 실패 시 기본 추출 시도 (월만)
+                date_info = DateUtils.extract_month_with_year_from_query(query)
+                if date_info:
+                    year, month = date_info
+                    from datetime import datetime
+                    current_year = datetime.now().year
+                    
+                    if year == current_year:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Enhanced query with date info: {year}년 {month}월")
+                    else:
+                        enhanced_query = f"{query} (날짜: {year}년 {month}월, 형식: {year}-{month:02d})"
+                        self.logger.debug(f"Query contains explicit year: {year}년 {month}월")
+            
             # 스키마 매핑 정보를 프롬프트 템플릿에 설정
             if schema_mapping:
                 relevant_schema = {}
@@ -1585,9 +2243,9 @@ JSON 형식으로만 응답:
                         relevant_schema[table_name] = self.db_schema[table_name]
                 self.prompt_template.set_schema(relevant_schema)
             
-            # 프롬프트 생성 (RAG 컨텍스트 통합)
+            # 프롬프트 생성 (RAG 컨텍스트 통합, 날짜 정보가 보강된 쿼리 사용)
             prompt = self.prompt_template.create_prompt(
-                user_query=query,
+                user_query=enhanced_query,  # 날짜 정보가 보강된 쿼리 사용
                 include_relevant_examples=True,
                 rag_context=rag_context if rag_context else None,
                 max_context_length=4000
@@ -1611,11 +2269,8 @@ JSON 형식으로만 응답:
             else:
                 sql_query = str(response_content).strip()
             
-            # SQL 추출 (```sql ... ``` 형태에서 추출)
-            if "```sql" in sql_query:
-                sql_query = sql_query.split("```sql")[1].split("```")[0].strip()
-            elif "```" in sql_query:
-                sql_query = sql_query.split("```")[1].split("```")[0].strip()
+            # SQL 추출 (```sql ... ``` 형태에서 추출) - 정규식 사용으로 안전성 강화
+            sql_query = self._extract_sql_from_text(sql_query)
             
             if sql_query:
                 self.logger.info(f"Complex SQL generated: {sql_query[:100]}...")
@@ -1627,6 +2282,128 @@ JSON 형식으로만 응답:
         except Exception as e:
             self.logger.error(f"Error in complex SQL generation: {str(e)}", exc_info=True)
         return None
+    
+    def _ensure_creator_name_in_sql(self, sql_query: str, user_query: str, state: GraphState) -> str:
+        """
+        SQL에 크리에이터 이름(nickname)이 필요한지 확인하고 자동으로 추가
+        
+        Args:
+            sql_query: 생성된 SQL 쿼리
+            user_query: 사용자 쿼리
+            state: 현재 상태
+            
+        Returns:
+            보정된 SQL 쿼리
+        """
+        try:
+            sql_lower = sql_query.lower()
+            
+            # 1. 사용자가 이름을 요청했는지 확인
+            if not self._should_include_creator_name(user_query):
+                return sql_query
+            
+            # 2. SQL에 이미 nickname이 포함되어 있는지 확인
+            if "nickname" in sql_lower or "creator_name" in sql_lower:
+                self.logger.debug("SQL already includes creator nickname")
+                return sql_query
+            
+            # 3. SQL에 creator_no가 있는지 확인
+            if "creator_no" not in sql_lower and "creator_id" not in sql_lower:
+                # creator 컬럼이 없으면 nickname 추가 불가
+                self.logger.debug("No creator column found in SQL, skipping nickname join")
+                return sql_query
+            
+            # 4. FROM 절에서 t_fanding 또는 creator 관련 테이블 찾기
+            import re
+            
+            # t_fanding 테이블이 있는지 확인
+            if "from t_fanding" in sql_lower or "from `t_fanding`" in sql_lower:
+                # t_fanding이 있으면 t_creator와 t_member JOIN 추가
+                # SELECT 절에 nickname 추가
+                if re.search(r'select\s+([^,]+(?:\s*,\s*[^,]+)*)\s+from', sql_lower, re.IGNORECASE):
+                    # SELECT 절에 nickname 추가
+                    select_match = re.search(r'(select\s+)([^,]+(?:\s*,\s*[^,]+)*)(\s+from)', sql_lower, re.IGNORECASE)
+                    if select_match:
+                        select_clause = select_match.group(2)
+                        # nickname이 이미 없으면 추가
+                        if "cm.nickname" not in sql_lower and "nickname" not in sql_lower:
+                            # alias 확인 (f, c 등)
+                            alias_match = re.search(r'from\s+t_fanding\s+(\w+)', sql_lower, re.IGNORECASE)
+                            f_alias = alias_match.group(1) if alias_match else "f"
+                            
+                            # t_creator JOIN이 있는지 확인
+                            if f"join t_creator" not in sql_lower and f"join `t_creator`" not in sql_lower:
+                                # t_creator JOIN 추가
+                                creator_col = self._guess_creator_column(state)
+                                if creator_col:
+                                    # FROM 절 다음에 JOIN 추가
+                                    from_match = re.search(r'from\s+t_fanding\s*\w*', sql_lower, re.IGNORECASE)
+                                    if from_match:
+                                        # JOIN 추가 위치 찾기 (WHERE 또는 GROUP BY 전)
+                                        where_match = re.search(r'\s+(where|group\s+by|order\s+by|limit)', sql_lower, re.IGNORECASE)
+                                        join_pos = where_match.start() if where_match else len(sql_query)
+                                        
+                                        # JOIN 추가
+                                        join_clause = f" INNER JOIN t_creator c ON {f_alias}.{creator_col} = c.no INNER JOIN t_member cm ON c.member_no = cm.no"
+                                        sql_query = sql_query[:join_pos] + join_clause + sql_query[join_pos:]
+                                        
+                                        # SELECT 절에 nickname 추가
+                                        select_end = select_match.end(2)
+                                        sql_query = sql_query[:select_end] + f", cm.nickname AS creator_name" + sql_query[select_end:]
+                                        
+                                        # GROUP BY에 nickname 추가 (GROUP BY가 있는 경우)
+                                        if "group by" in sql_lower:
+                                            group_by_match = re.search(r'group\s+by\s+([^order\s+by|limit]+)', sql_lower, re.IGNORECASE)
+                                            if group_by_match:
+                                                group_by_clause = group_by_match.group(1)
+                                                if "cm.nickname" not in group_by_clause:
+                                                    sql_query = re.sub(
+                                                        r'(group\s+by\s+)([^order\s+by|limit]+)',
+                                                        r'\1\2, cm.nickname',
+                                                        sql_query,
+                                                        flags=re.IGNORECASE
+                                                    )
+                                        
+                                        self.logger.info("Added creator nickname JOIN to SQL (name requested)")
+                                        return sql_query
+            
+            # 5. t_creator 테이블이 직접 있는 경우
+            if "from t_creator" in sql_lower or "from `t_creator`" in sql_lower:
+                # t_member JOIN 추가
+                if "join t_member" not in sql_lower and "join `t_member`" not in sql_lower:
+                    where_match = re.search(r'\s+(where|group\s+by|order\s+by|limit)', sql_lower, re.IGNORECASE)
+                    join_pos = where_match.start() if where_match else len(sql_query)
+                    
+                    # t_member JOIN 추가
+                    alias_match = re.search(r'from\s+t_creator\s+(\w+)', sql_lower, re.IGNORECASE)
+                    c_alias = alias_match.group(1) if alias_match else "c"
+                    
+                    join_clause = f" INNER JOIN t_member cm ON {c_alias}.member_no = cm.no"
+                    sql_query = sql_query[:join_pos] + join_clause + sql_query[join_pos:]
+                    
+                    # SELECT 절에 nickname 추가
+                    select_match = re.search(r'(select\s+)([^,]+(?:\s*,\s*[^,]+)*)(\s+from)', sql_lower, re.IGNORECASE)
+                    if select_match and "cm.nickname" not in sql_lower:
+                        select_end = select_match.end(2)
+                        sql_query = sql_query[:select_end] + f", cm.nickname AS creator_name" + sql_query[select_end:]
+                        
+                        # GROUP BY에 nickname 추가 (GROUP BY가 있는 경우)
+                        if "group by" in sql_lower:
+                            sql_query = re.sub(
+                                r'(group\s+by\s+)([^order\s+by|limit]+)',
+                                r'\1\2, cm.nickname',
+                                sql_query,
+                                flags=re.IGNORECASE
+                            )
+                    
+                    self.logger.info("Added creator nickname JOIN to SQL (name requested)")
+                    return sql_query
+            
+            return sql_query
+            
+        except Exception as e:
+            self.logger.warning(f"Error ensuring creator name in SQL: {e}, returning original SQL")
+            return sql_query
 
 
 class SQLValidationNode(BaseNode):
@@ -2004,6 +2781,36 @@ class DataSummarizationNode(BaseNode):
                 state["success"] = True
                 return state
             
+            # 하이브리드 접근: resolved_context를 활용한 이전 답변 재사용
+            resolved_context = state.get("resolved_context")
+            conversation_history = state.get("conversation_history", [])
+            if resolved_context and resolved_context.get("reusable_result"):
+                # 캐시에서 복원된 결과 사용
+                previous_answer = resolved_context.get("previous_answer")
+                if previous_answer:
+                    # 맥락을 고려한 응답 생성 (이전 답변 참조)
+                    contextual_response = self._generate_contextual_response_from_cache(
+                        user_query, previous_answer, conversation_history
+                    )
+                    self.logger.info(f"Generated contextual response using cached result")
+                    state["data_summary"] = contextual_response
+                    state["success"] = True
+                    # 대화 히스토리 업데이트
+                    self._update_conversation_history_in_state(state, user_query, contextual_response)
+                    return state
+            
+            # 이전 답변 재사용 체크 (예: "10월 기준 매출 top3가 누구라고? 너가 알려줬었는데")
+            conversation_history = state.get("conversation_history", [])
+            if conversation_history and any(kw in user_query.lower() for kw in ["알려줬", "알려줬었", "말했", "말했었", "이미", "방금"]):
+                previous_answer = self._find_previous_answer_for_query(conversation_history, user_query)
+                if previous_answer:
+                    self.logger.info(f"Reusing previous answer from conversation history")
+                    state["data_summary"] = previous_answer
+                    state["success"] = True
+                    # 대화 히스토리 업데이트
+                    self._update_conversation_history_in_state(state, user_query, previous_answer)
+                    return state
+            
             # 비데이터 의도에 대한 맥락을 고려한 개인화된 응답 생성
             if intent in ["GREETING", "GENERAL_CHAT", "HELP_REQUEST"]:
                 try:
@@ -2069,9 +2876,19 @@ class DataSummarizationNode(BaseNode):
             state["insight_report"] = None
             state["business_insights"] = None
             
-            # 요약 생성
+            # 요약 생성 (맥락을 고려한 응답 생성)
+            resolved_context = state.get("resolved_context")
+            conversation_history = state.get("conversation_history", [])
+            
             if self.llm:
-                summary = self._generate_ai_summary(user_query, query_result, result_stats)
+                # resolved_context가 있으면 이전 답변을 참조하여 맥락 있는 응답 생성
+                if resolved_context and resolved_context.get("previous_answer"):
+                    summary = self._generate_contextual_ai_summary(
+                        user_query, query_result, result_stats, 
+                        resolved_context, conversation_history
+                    )
+                else:
+                    summary = self._generate_ai_summary(user_query, query_result, result_stats)
             else:
                 summary = self._generate_fallback_summary(query_result, result_stats)
             
@@ -2292,6 +3109,177 @@ class DataSummarizationNode(BaseNode):
             self.logger.warning(f"Error generating contextual response: {e}, using template")
             return self._generate_template_response(intent, user_query)
     
+    def _generate_contextual_response_from_cache(
+        self,
+        user_query: str,
+        previous_answer: str,
+        conversation_history: List[Dict[str, str]]
+    ) -> str:
+        """
+        캐시에서 복원된 이전 답변을 참조하여 맥락을 고려한 응답 생성 (하이브리드 접근)
+        
+        Args:
+            user_query: 현재 사용자 쿼리
+            previous_answer: 이전에 생성된 답변
+            conversation_history: 대화 히스토리
+            
+        Returns:
+            맥락을 고려한 응답 문자열
+        """
+        try:
+            if not self.llm:
+                # LLM이 없으면 이전 답변을 그대로 반환
+                return previous_answer
+            
+            from langchain_core.messages import HumanMessage
+            
+            # 맥락을 고려한 응답 생성 프롬프트
+            context_prompt = f"""
+사용자가 이전에 물어본 질문에 대한 답변을 참조하여 새로운 질문에 답변해주세요.
+
+이전 대화 맥락:
+{self._format_conversation_history(conversation_history[-4:]) if conversation_history else "없음"}
+
+이전 답변:
+{previous_answer[:500]}...
+
+현재 사용자 질문:
+{user_query}
+
+요구사항:
+1. 이전 답변을 참조하여 자연스럽게 응답
+2. "이전에 말씀드린 대로", "앞서 알려드린" 등의 표현 사용
+3. 대화의 연속성을 유지하며 친절하게 답변
+4. 한국어로 작성
+
+답변:
+"""
+            
+            messages = [HumanMessage(content=context_prompt)]
+            response = self.llm.invoke(messages)
+            
+            if hasattr(response, 'content'):
+                response_text = response.content
+                if isinstance(response_text, str):
+                    return response_text.strip()
+                elif isinstance(response_text, list):
+                    return " ".join(str(item) for item in response_text).strip()
+                else:
+                    return str(response_text).strip()
+            else:
+                return str(response).strip()
+                
+        except Exception as e:
+            self.logger.warning(f"Error generating contextual response from cache: {e}, using previous answer")
+            return previous_answer
+    
+    def _generate_contextual_ai_summary(
+        self,
+        user_query: str,
+        query_result: List[Dict[str, Any]],
+        result_stats: Dict[str, Any],
+        resolved_context: Dict[str, Any],
+        conversation_history: List[Dict[str, str]]
+    ) -> str:
+        """
+        이전 답변을 참조하여 맥락을 고려한 AI 요약 생성 (하이브리드 접근)
+        
+        Args:
+            user_query: 사용자 쿼리
+            query_result: 쿼리 결과
+            result_stats: 결과 통계
+            resolved_context: 해석된 컨텍스트 (이전 답변 포함)
+            conversation_history: 대화 히스토리
+            
+        Returns:
+            맥락을 고려한 요약 문자열
+        """
+        try:
+            from langchain_core.messages import HumanMessage
+            
+            previous_answer = resolved_context.get("previous_answer", "")
+            
+            # 결과 데이터 포맷팅
+            formatted_results = self._format_results(query_result)
+            
+            # 맥락을 고려한 요약 프롬프트
+            summary_prompt = f"""
+다음 데이터베이스 쿼리 결과를 분석하여 사용자 친화적인 요약을 생성해주세요.
+이전 대화 맥락을 참조하여 자연스럽게 응답해주세요.
+
+이전 대화 맥락:
+{self._format_conversation_history(conversation_history[-4:]) if conversation_history else "없음"}
+
+이전 답변 (참고용):
+{previous_answer[:300] if previous_answer else "없음"}
+
+원본 질문: {user_query}
+
+쿼리 결과 통계:
+- 총 행 수: {result_stats['row_count']}
+- 컬럼 수: {len(result_stats['columns'])}
+- 컬럼명: {', '.join(result_stats['columns'])}
+
+샘플 데이터:
+{formatted_results[:500]}...
+
+요구사항:
+1. 결과의 주요 내용을 간결하게 설명
+2. 데이터의 규모와 특징을 언급
+3. 이전 대화 맥락을 고려하여 자연스럽게 연결
+4. 사용자가 이해하기 쉬운 언어 사용
+5. 3-5문장으로 요약
+6. 한국어로 작성
+
+요약:
+"""
+            
+            messages = [
+                HumanMessage(content=f"당신은 데이터 분석 전문가입니다. 쿼리 결과를 사용자 친화적으로 요약해주세요.\n\n{summary_prompt}")
+            ]
+            
+            if not self.llm:
+                self.logger.warning("LLM not initialized, returning default summary")
+                return self._generate_fallback_summary(query_result, result_stats)
+            
+            response = self.llm.invoke(messages)
+            response_content = response.content
+            
+            if isinstance(response_content, str):
+                return response_content.strip()
+            elif isinstance(response_content, list):
+                return " ".join(str(item) for item in response_content).strip()
+            else:
+                return str(response_content).strip()
+                
+        except Exception as e:
+            self.logger.error(f"Contextual AI summary generation failed: {e}")
+            return self._generate_fallback_summary(query_result, result_stats)
+    
+    def _format_conversation_history(self, history: List[Dict[str, str]]) -> str:
+        """
+        대화 히스토리를 포맷팅
+        
+        Args:
+            history: 대화 히스토리 리스트
+            
+        Returns:
+            포맷팅된 문자열
+        """
+        if not history:
+            return ""
+        
+        formatted = []
+        for msg in history:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if role == "user":
+                formatted.append(f"사용자: {content}")
+            elif role == "assistant":
+                formatted.append(f"봇: {content}")
+        
+        return "\n".join(formatted)
+    
     def _update_conversation_history_in_state(
         self, 
         state: GraphState, 
@@ -2339,6 +3327,108 @@ class DataSummarizationNode(BaseNode):
         except Exception as e:
             self.logger.warning(f"Failed to update conversation history in state: {str(e)}")
             # Non-critical error, continue execution
+    
+    def _extract_creator_no_from_history(self, conversation_history: List[Dict[str, str]], current_query: str) -> Optional[int]:
+        """
+        대화 히스토리에서 creator_no 추출
+        
+        Args:
+            conversation_history: 대화 히스토리
+            current_query: 현재 쿼리
+            
+        Returns:
+            추출된 creator_no 또는 None
+        """
+        import re
+        # 최근 5개 메시지에서 찾기
+        recent_messages = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+        
+        for msg in reversed(recent_messages):
+            content = msg.get("content", "")
+            if not content:
+                continue
+            
+            # creator_no 패턴 찾기 (예: "3142", "creator_no: 3142", "creator_no=3142")
+            patterns = [
+                r'creator_no[:\s=]+(\d+)',
+                r'(\d+)\s*번',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    try:
+                        creator_no = int(match.group(1))
+                        if 1000 <= creator_no <= 99999:  # 합리적인 범위
+                            self.logger.debug(f"Found creator_no={creator_no} in history: {content[:100]}")
+                            return creator_no
+                    except ValueError:
+                        continue
+            
+            # SQL 결과에서 creator_no 추출 (표 형식)
+            if "creator_no" in content.lower() and "|" in content:
+                # 표 형식에서 숫자 추출
+                numbers = re.findall(r'\b\d{4,5}\b', content)  # 4-5자리 숫자
+                if numbers:
+                    try:
+                        creator_no = int(numbers[0])
+                        if 1000 <= creator_no <= 99999:
+                            self.logger.debug(f"Found creator_no={creator_no} from table in history")
+                            return creator_no
+                    except ValueError:
+                        continue
+        
+        return None
+    
+    def _find_previous_answer_for_query(self, conversation_history: List[Dict[str, str]], current_query: str) -> Optional[str]:
+        """
+        대화 히스토리에서 현재 쿼리와 유사한 이전 답변 찾기
+        
+        Args:
+            conversation_history: 대화 히스토리
+            current_query: 현재 쿼리
+            
+        Returns:
+            이전 답변 또는 None
+        """
+        import re
+        # 현재 쿼리에서 키워드 추출 (예: "10월", "매출", "top3")
+        query_keywords = []
+        months = ["10월", "11월", "12월", "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월"]
+        for month in months:
+            if month in current_query:
+                query_keywords.append(month)
+        if "매출" in current_query or "sales" in current_query.lower():
+            query_keywords.append("매출")
+        if "top" in current_query.lower() or "상위" in current_query:
+            query_keywords.append("top")
+        if "크리에이터" in current_query or "creator" in current_query.lower():
+            query_keywords.append("크리에이터")
+        
+        if not query_keywords:
+            return None
+        
+        # 최근 10개 메시지에서 찾기
+        recent_messages = conversation_history[-10:] if len(conversation_history) > 10 else conversation_history
+        
+        # 사용자 질문과 봇 답변 쌍 찾기
+        for i in range(len(recent_messages) - 1, 0, -2):
+            if i >= 1:
+                user_msg = recent_messages[i-1] if recent_messages[i-1].get("role") == "user" else None
+                assistant_msg = recent_messages[i] if recent_messages[i].get("role") == "assistant" else None
+                
+                if user_msg and assistant_msg:
+                    user_content = user_msg.get("content", "")
+                    assistant_content = assistant_msg.get("content", "")
+                    
+                    # 키워드 매칭 확인
+                    if all(kw in user_content for kw in query_keywords if kw):
+                        # 키워드가 모두 포함된 이전 질문-답변 쌍 발견
+                        if len(assistant_content) > 50:  # 의미있는 답변인지 확인
+                            self.logger.debug(f"Found previous answer for query with keywords: {query_keywords}")
+                            return assistant_content
+        
+        return None
     
     def _extract_user_name(self, conversation_history: List[Dict[str, str]]) -> Optional[str]:
         """

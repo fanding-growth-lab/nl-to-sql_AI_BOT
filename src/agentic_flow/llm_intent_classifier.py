@@ -346,12 +346,45 @@ class LLMIntentClassifier(BaseNode):
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Optional[IntentClassificationResult]:
         """
-        LLM 호출 실패 시 대화 히스토리 기반 간단한 분류 (Fallback)
+        LLM 호출 실패 시 키워드 기반 간단한 분류 (Fallback)
+        데이터 조회 키워드를 우선 확인하여 잘못된 분류를 방지
         """
         try:
             query_lower = query.lower().strip()
             
-            # 간단한 키워드 기반 분류
+            # 1. 데이터 조회 키워드 확인 (최우선)
+            # 매출, 매출액, 정산, 결제, 수익, 금액, 합계, 집계, 조회, 알려줘, 보여줘 등
+            data_query_keywords = [
+                "매출", "매출액", "정산", "결제", "수익", "금액", "합계", "집계", 
+                "조회", "알려줘", "보여줘", "가져와", "찾아", "검색",
+                "회원", "가입자", "구독자", "크리에이터", "작가",
+                "top", "상위", "최고", "최대", "최소", "평균", "개수", "수",
+                "월", "년", "일", "주", "기간", "날짜",
+                "비교", "분석", "트렌드", "증가", "감소", "변화"
+            ]
+            
+            has_data_keywords = any(keyword in query_lower for keyword in data_query_keywords)
+            
+            if has_data_keywords:
+                # 데이터 조회 키워드가 있으면 데이터 쿼리로 분류
+                # 복잡한 분석 키워드 확인
+                complex_keywords = ["비율", "교집합", "합집합", "차집합", "트렌드", "분석", "비교", "상관", "회귀"]
+                is_complex = any(keyword in query_lower for keyword in complex_keywords)
+                
+                if is_complex:
+                    return IntentClassificationResult(
+                        QueryIntent.COMPLEX_ANALYSIS,
+                        0.7,
+                        "Fallback: 데이터 조회 키워드 + 복잡한 분석 키워드 감지 (COMPLEX_ANALYSIS)"
+                    )
+                else:
+                    return IntentClassificationResult(
+                        QueryIntent.SIMPLE_AGGREGATION,
+                        0.7,
+                        "Fallback: 데이터 조회 키워드 감지 (SIMPLE_AGGREGATION)"
+                    )
+            
+            # 2. 간단한 키워드 기반 분류 (데이터 조회가 아닌 경우만)
             greeting_keywords = ["안녕", "하이", "헬로", "반가워", "만나서"]
             help_keywords = ["도와", "도움", "사용법", "어떻게", "뭘 할 수", "기능"]
             
@@ -369,20 +402,25 @@ class LLMIntentClassifier(BaseNode):
                     "Fallback: 키워드 기반 분류 (도움말 요청)"
                 )
             
-            # 대화 히스토리 기반 분류
+            # 3. 대화 히스토리 기반 분류 (데이터 조회가 아닌 경우만)
             if conversation_history:
-                # 이전 대화에서 이름을 물어본 적이 있으면 GENERAL_CHAT으로 분류
+                # 이전 대화에서 이름을 물어본 적이 있고, 현재 쿼리에도 이름 관련 키워드가 있으면 GENERAL_CHAT
                 recent_history = conversation_history[-3:] if len(conversation_history) > 3 else conversation_history
+                name_in_history = False
                 for msg in recent_history:
                     content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
                     if "이름" in content or "뭐라고" in content:
-                        return IntentClassificationResult(
-                            QueryIntent.GENERAL_CHAT,
-                            0.8,
-                            "Fallback: 대화 히스토리 기반 분류 (일반 대화)"
-                        )
+                        name_in_history = True
+                        break
+                
+                if name_in_history and ("이름" in query_lower or "뭐라고" in query_lower or "라고" in query_lower):
+                    return IntentClassificationResult(
+                        QueryIntent.GENERAL_CHAT,
+                        0.8,
+                        "Fallback: 대화 히스토리 기반 분류 (이름 관련 일반 대화)"
+                    )
             
-            # 기본값: GENERAL_CHAT
+            # 4. 기본값: 데이터 조회 키워드가 없으면 GENERAL_CHAT
             return IntentClassificationResult(
                 QueryIntent.GENERAL_CHAT,
                 0.6,

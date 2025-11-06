@@ -575,17 +575,26 @@ class RAGSchemaRetrieverNode(BaseNode):
             intent = state.get("intent")
             
             # Step 1: Entity-based schema mapping (SchemaMapper 기능 통합)
+            # 비즈니스 키워드 기반 매핑도 포함 (entities가 없어도 작동)
             schema_mapping = None
-            if entities:
-                # 엔티티 기반으로 테이블, 컬럼, 관계 찾기
-                relevant_tables = self._find_relevant_tables(entities)
-                relevant_columns = self._find_relevant_columns(entities, relevant_tables)
+            
+            # Entity 기반 또는 비즈니스 키워드 기반으로 테이블 찾기
+            # entities가 없어도 user_query의 비즈니스 키워드로 테이블 검색 가능
+            relevant_tables = self._find_relevant_tables(entities, user_query=user_query)
+            
+            if relevant_tables:
+                # Entity가 있으면 컬럼도 찾기, 없으면 빈 리스트
+                relevant_columns = self._find_relevant_columns(entities, relevant_tables) if entities else []
                 relationships = self._find_relationships(relevant_tables)
                 
-                # Confidence 계산
-                confidence = self._calculate_mapping_confidence(
-                    entities, relevant_tables, relevant_columns
-                )
+                # Confidence 계산 (entities가 있으면 더 높은 confidence)
+                if entities:
+                    confidence = self._calculate_mapping_confidence(
+                        entities, relevant_tables, relevant_columns
+                    )
+                else:
+                    # 비즈니스 키워드만으로 찾은 경우 중간 confidence
+                    confidence = 0.6
                 
                 # SchemaMapping 객체 생성
                 schema_mapping = SchemaMapping(
@@ -595,7 +604,10 @@ class RAGSchemaRetrieverNode(BaseNode):
                     confidence=confidence
                 )
                 
-                logger.info(f"Entity-based mapping: {len(relevant_tables)} tables, {len(relevant_columns)} columns")
+                if entities:
+                    logger.info(f"Entity-based mapping: {len(relevant_tables)} tables, {len(relevant_columns)} columns")
+                else:
+                    logger.info(f"Business keyword-based mapping: {len(relevant_tables)} tables (no entities extracted)")
             
             # Step 2: RAG 검색으로 스키마 컨텍스트 확장
             filter_tables = None
@@ -607,6 +619,13 @@ class RAGSchemaRetrieverNode(BaseNode):
             if schema_mapping and schema_mapping.relevant_tables:
                 # 엔티티 정보 추가 (RAG 검색 향상)
                 search_query += " " + " ".join(schema_mapping.relevant_tables)
+                # 비즈니스 키워드가 있으면 관련 테이블명도 명시적으로 추가
+                business_keywords = ["매출", "결제", "수익", "매출액", "revenue", "payment"]
+                if any(keyword in user_query.lower() for keyword in business_keywords):
+                    payment_tables = ["t_payment", "t_fanding_log", "t_fanding"]
+                    for table in payment_tables:
+                        if table not in search_query:
+                            search_query += f" {table}"
             
             # 관련 스키마 정보 검색 (하이브리드 검색 사용)
             schema_chunks = self.retrieve_relevant_schema(
@@ -684,18 +703,34 @@ class RAGSchemaRetrieverNode(BaseNode):
     
     # ========== SchemaMapper 기능 통합 메서드 ==========
     
-    def _find_relevant_tables(self, entities: List[Entity]) -> List[str]:
+    def _find_relevant_tables(self, entities: List[Entity], user_query: str = "") -> List[str]:
         """
-        Find relevant tables based on entities (SchemaMapper 기능)
+        Find relevant tables based on entities and business keywords (SchemaMapper 기능 + 비즈니스 키워드 매핑)
         
         Args:
             entities: List of extracted entities
+            user_query: User query string for business keyword detection (optional)
             
         Returns:
             List of relevant table names
         """
         relevant_tables = []
         
+        # 비즈니스 키워드 → 테이블 매핑 정의
+        BUSINESS_KEYWORD_TO_TABLES = {
+            "매출": ["t_payment", "t_fanding_log", "t_fanding"],
+            "결제": ["t_payment", "t_fanding"],
+            "수익": ["t_payment", "t_fanding_log"],
+            "매출액": ["t_payment", "t_fanding_log"],
+            "revenue": ["t_payment", "t_fanding_log"],
+            "payment": ["t_payment", "t_fanding"],
+            "pay": ["t_payment", "t_fanding"],
+            "remain_price": ["t_payment"],
+            "금액": ["t_payment", "t_fanding_log"],
+            "수익금": ["t_payment", "t_fanding_log"]
+        }
+        
+        # 1. Entity 기반 테이블 검색 (기존 로직)
         for entity in entities:
             if entity.type == "table":
                 # Direct table mention
@@ -707,6 +742,16 @@ class RAGSchemaRetrieverNode(BaseNode):
                 for table_name, table_info in self.db_schema.items():
                     if entity.name in table_info.get("columns", {}):
                         relevant_tables.append(table_name)
+        
+        # 2. 비즈니스 키워드 기반 테이블 추가 (Entity가 없어도 검색 가능)
+        if user_query:
+            query_lower = user_query.lower()
+            for keyword, tables in BUSINESS_KEYWORD_TO_TABLES.items():
+                if keyword in query_lower:
+                    for table in tables:
+                        if table in self.db_schema and table not in relevant_tables:
+                            relevant_tables.append(table)
+                            logger.debug(f"Added table '{table}' based on business keyword '{keyword}'")
         
         return list(set(relevant_tables))
     
