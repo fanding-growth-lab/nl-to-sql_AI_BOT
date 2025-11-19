@@ -179,6 +179,15 @@
       "last_used": "2025-11-06T16:25:03.086227",
       "common_variations": [],
       "user_feedback": []
+    },
+    "MONTH_3_MEMBER_QUERY_ACTION_COUNT": {
+      "pattern": "25년 3월부터 10월까지 “강환국 작가”의 월별 회원수(신규회원, 기존 회원)와 월 매출액 추이를 알려줘",
+      "frequency": 2,
+      "success_rate": 0.0,
+      "avg_confidence": 0.7,
+      "last_used": "2025-11-19T14:26:37.273767",
+      "common_variations": [],
+      "user_feedback": []
     }
   },
   "user_behaviors": {
@@ -201,7 +210,8 @@
         "MONTH_1_CREATOR_REVENUE": 1,
         "CREATOR": 1,
         "MONTH_10_PAYMENT_REVENUE": 4,
-        "MEMBER_COUNT": 1
+        "MEMBER_COUNT": 1,
+        "MONTH_3_MEMBER_QUERY_ACTION_COUNT": 2
       },
       "time_patterns": {
         "17:00": 25,
@@ -212,12 +222,12 @@
         "10:00": 15,
         "11:00": 21,
         "13:00": 7,
-        "14:00": 35,
+        "14:00": 37,
         "19:00": 8,
         "08:00": 16,
         "09:00": 25
       },
-      "success_rate": 0.004878048780487804,
+      "success_rate": 0.004830917874396134,
       "feedback_history": []
     },
     "U08MZB4CQDD": {
@@ -454,10 +464,10 @@
     }
   },
   "learning_metrics": {
-    "total_queries": 382,
+    "total_queries": 384,
     "successful_mappings": 66,
-    "failed_mappings": 316,
-    "avg_confidence": 0.8684816753926704,
+    "failed_mappings": 318,
+    "avg_confidence": 0.8676041666666668,
     "most_common_patterns": [],
     "improvement_suggestions": []
   }

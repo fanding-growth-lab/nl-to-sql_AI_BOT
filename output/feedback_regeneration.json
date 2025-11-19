@@ -1,0 +1,14 @@
+[
+  {
+    "query_name": "get_creator_info",
+    "sql": "SELECT tm.nickname, tc.no AS creator_no FROM t_member AS tm JOIN t_creator AS tc ON tm.no = tc.member_no WHERE tm.nickname IN ('강환국 작가', '고래돈공부');"
+  },
+  {
+    "query_name": "get_active_memberships_in_aug_2025",
+    "sql": "SELECT tf.member_no, tf.creator_no, tfl.start_date, tfl.end_date, tf.no AS fanding_no, tfl.no AS fanding_log_no, tfl.coupon_member_no FROM t_fanding AS tf JOIN t_fanding_log AS tfl ON tf.current_fanding_log_no = tfl.no WHERE tf.fanding_status = 'T' AND tfl.start_date <= '2025-08-31' AND tfl.end_date >= '2025-08-01';"
+  },
+  {
+    "query_name": "get_creator_membership_payments_in_aug_2025",
+    "sql": "SELECT tp.seller_creator_no, tp.remain_price, tp.currency_no, tp.remain_heat FROM t_payment AS tp WHERE tp.item = 'F' AND tp.status IN ('T', 'P') AND tp.pay_datetime >= '2025-08-01 00:00:00' AND tp.pay_datetime <= '2025-08-31 23:59:59' AND tp.seller_creator_no IN (SELECT tc.no FROM t_member AS tm JOIN t_creator AS tc ON tm.no = tc.member_no WHERE tm.nickname IN ('강환국 작가', '고래돈공부'));"
+  }
+]

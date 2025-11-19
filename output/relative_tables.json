@@ -1,0 +1,117 @@
+[
+  {
+    "table": "t_member",
+    "schema": [
+      {
+        "column": "no",
+        "type": "int(11) unsigned",
+        "description": "[회원의 고유 번호 (PK)]"
+      },
+      {
+        "column": "nickname",
+        "type": "varchar(100)",
+        "description": "[회원 닉네임]"
+      }
+    ],
+    "reason": "사용자 질문에서 언급된 '강환국 작가'의 `member_no`를 식별하기 위해 `nickname` 컬럼을 사용합니다."
+  },
+  {
+    "table": "t_creator",
+    "schema": [
+      {
+        "column": "no",
+        "type": "int(10) unsigned",
+        "description": "[크리에이터를 고유하게 식별하는 번호 (PK)]"
+      },
+      {
+        "column": "member_no",
+        "type": "int(10) unsigned",
+        "description": "[해당 크리에이터의 member_no. (즉, 크리에이터도 멤버의 한 종류)]"
+      }
+    ],
+    "reason": "`t_member` 테이블에서 식별한 '강환국 작가'의 `member_no`를 이용하여 해당 크리에이터의 고유 `creator_no`를 얻기 위해 사용합니다. 이 `creator_no`는 다른 테이블에서 크리에이터별 데이터를 필터링하는 데 필요합니다."
+  },
+  {
+    "table": "t_fanding",
+    "schema": [
+      {
+        "column": "no",
+        "type": "int(11) unsigned",
+        "description": "[팬딩(멤버십 가입 건) 자체를 고유하게 식별하는 번호 (PK)]"
+      },
+      {
+        "column": "member_no",
+        "type": "int(11) unsigned",
+        "description": "[해당 멤버십에 가입한 멤버의 member_no (FK to t_member.no)]"
+      },
+      {
+        "column": "creator_no",
+        "type": "int(11) unsigned",
+        "description": "[해당 멤버십을 제공하는 크리에이터의 creator_no (FK to t_creator.no)]"
+      },
+      {
+        "column": "ins_datetime",
+        "type": "datetime",
+        "description": "[해당 멤버가 이 크리에이터의 멤버십에 최초로 가입한 날짜 및 시간]"
+      }
+    ],
+    "reason": "크리에이터별 신규 회원수를 월별로 파악하기 위해 `ins_datetime` (최초 가입일)과 `creator_no`를 사용합니다. 또한 `t_fanding_log`와 조인하여 기존 회원수를 파악하는 데 필요한 `fanding_no`와 `member_no`를 제공합니다."
+  },
+  {
+    "table": "t_fanding_log",
+    "schema": [
+      {
+        "column": "no",
+        "type": "int(11) unsigned",
+        "description": "[로그 레코드 자체의 고유 ID (PK)]"
+      },
+      {
+        "column": "fanding_no",
+        "type": "int(11) unsigned",
+        "description": "[t_fanding 테이블의 No를 참조 (FK)]"
+      },
+      {
+        "column": "start_date",
+        "type": "date",
+        "description": "[해당 멤버십 기간의 시작일]"
+      },
+      {
+        "column": "end_date",
+        "type": "date",
+        "description": "[해당 멤버십 기간의 종료일]"
+      }
+    ],
+    "reason": "특정 월에 활성화된 멤버십 기간(`start_date`, `end_date`)을 확인하여 월별 기존 회원수를 파악하는 데 사용됩니다. `t_fanding` 테이블과 조인하여 크리에이터 및 멤버 정보를 연결합니다."
+  },
+  {
+    "table": "t_payment",
+    "schema": [
+      {
+        "column": "no",
+        "type": "int(10) unsigned",
+        "description": "[결제 고유 ID (PK)]"
+      },
+      {
+        "column": "seller_creator_no",
+        "type": "int(10) unsigned",
+        "description": "[매출 발생 크리에이터의 creator_no (FK)]"
+      },
+      {
+        "column": "price",
+        "type": "decimal(10,2) unsigned",
+        "description": "[결제 금액]"
+      },
+      {
+        "column": "pay_datetime",
+        "type": "datetime",
+        "description": "[결제 완료일]"
+      },
+      {
+        "column": "status",
+        "type": "char(1)",
+        "description": "[결제 상태 ('T','P' = 결제완료)]"
+      }
+    ],
+    "reason": "월별 매출액 추이를 계산하기 위해 `pay_datetime` 컬럼을 사용하여 월별로 그룹화하고 `price` 컬럼을 합산합니다. '강환국 작가'의 매출을 필터링하기 위해 `seller_creator_no`를 사용하며, 결제 완료된 건만 집계하기 위해 `status` 컬럼을 사용합니다."
+  }
+]

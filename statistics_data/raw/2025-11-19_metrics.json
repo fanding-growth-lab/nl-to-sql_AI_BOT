@@ -1,0 +1,4 @@
+{"timestamp": 1763529843.440415, "metrics": {"intent": "SIMPLE_AGGREGATION", "confidence": 0.7, "response_time_ms": 8247.451543807983, "timestamp": 1763529843.440415, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1763529893.9297833, "metrics": {"intent": "SIMPLE_AGGREGATION", "confidence": 0.7, "response_time_ms": 8344.146013259888, "timestamp": 1763529893.9297833, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1763529931.280661, "metrics": {"intent": "SIMPLE_AGGREGATION", "confidence": 0.7, "response_time_ms": 8441.381454467773, "timestamp": 1763529931.280661, "is_error": false}, "type": "raw_metrics"}
+{"timestamp": 1763529997.2737675, "metrics": {"intent": "SIMPLE_AGGREGATION", "confidence": 0.7, "response_time_ms": 74431.50639533997, "timestamp": 1763529997.2737675, "is_error": true}, "type": "raw_metrics"}

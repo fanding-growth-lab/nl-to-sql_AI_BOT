@@ -48,7 +48,7 @@ dependencies = [
     # HTTP Client
     "httpx==0.28.1",
     "requests==2.31.0",
-    "aiohttp>=3.8.0",  # Google AI 비동기 인증 전송을 위해 필요
+    "aiohttp>=3.8.0", # Google AI 비동기 인증 전송을 위해 필요
     # Logging
     "structlog==23.2.0",
     # Environment
@@ -60,6 +60,7 @@ dependencies = [
     # 데이터 분석 및 처리 (CodeExecutorNode용)
     "pandas>=2.0.0",
     "numpy>=1.24.0",
+    "matplotlib>=3.9.4",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,10 @@
+[
+  {
+    "query_name": "get_creator_sales",
+    "sql": "SELECT p.seller_creator_no AS `creator_no`, p.currency_no, p.remain_price, p.remain_heat, p.pay_datetime FROM t_payment AS p INNER JOIN t_creator AS c ON p.seller_creator_no = c.no INNER JOIN t_member AS m ON c.member_no = m.no WHERE m.nickname = '강환국 작가' AND p.status IN ('T', 'P') AND p.pay_datetime BETWEEN '2025-03-01 00:00:00' AND '2025-10-31 23:59:59'"
+  },
+  {
+    "query_name": "get_creator_memberships",
+    "sql": "SELECT f.creator_no, f.member_no, f.ins_datetime AS `first_subscription_datetime`, fl.start_date, fl.end_date FROM t_fanding AS f INNER JOIN t_fanding_log AS fl ON f.no = fl.fanding_no INNER JOIN t_creator AS c ON f.creator_no = c.no INNER JOIN t_member AS m ON c.member_no = m.no WHERE m.nickname = '강환국 작가' AND fl.start_date <= '2025-10-31' AND fl.end_date >= '2025-03-01'"
+  }
+]

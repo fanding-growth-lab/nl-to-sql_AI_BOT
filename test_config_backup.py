@@ -6,7 +6,6 @@ import io # Add io import
 from dotenv import load_dotenv
 load_dotenv()
 
-
 # === SQL CONFIG ===
 from sqlalchemy import create_engine, text
 
@@ -26,7 +25,6 @@ with engine.connect() as conn:
     result = conn.execute(text("SELECT 1"))
     assert result.scalar()
 
-
 # === GEMINI CONFIG ===
 from google import genai
 
@@ -35,45 +33,116 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 client = genai.Client(api_key=GOOGLE_API_KEY)
 chat = client.chats.create(model='gemini-2.5-flash')
 
-
 # === GLOBAL FUNCTIONS ===
-def save_result(result, output_filename: str, verbose=False):
-    output_dir = "output"
+def generate(contents):
+    ipt = contents
+    response = chat.send_message(contents)
+    opt = response.text
+    clean_opt = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", opt).strip()
+
+    return clean_opt
+
+def get_data_gathering_sql(user_query, rag_schema_context) -> list:
+    return json.loads(
+        generate(
+            contents=PROMPT_DATA_GATHERING.format(user_query=user_query, rag_schema_context=rag_schema_context, business_rules=BUSINESS_RULES)
+        )
+    )
+
+def save_sql_queries_to_json(sqls: list, session_id: str):
+    output_dir = "sql_queries"
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, output_filename)
-    if file_path.endswith(".json"):
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-    else:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(result)
-    if verbose:
-        print(f"{output_dir}/{output_filename}에 아래 내용 저장.")
-        print(result)
+    file_path = os.path.join(output_dir, f"{session_id}.json")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(sqls, f, ensure_ascii=False, indent=2)
     return file_path
 
-import sys
-from io import StringIO
+def save_sql_results_to_json(results: dict, session_id: str):
+    output_dir = "sql_query_results"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"{session_id}.json")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    return file_path
+
+def get_python_code(user_query, results_head, results_file_path, sql_queries_file_path, error_feedback=None):
+    prompt_content = PROMPT_GENERATE_PYTHON_CODE.format(
+        user_query=user_query, 
+        results_head=results_head, 
+        results_file_path=results_file_path,
+        sql_queries_file_path=sql_queries_file_path
+    )
+    if error_feedback:
+        prompt_content += f"\n\n## Previous Error Feedback\n{error_feedback}\n\n### 🎯 Your Task: Correct the code based on the feedback."
+
+    return generate(contents=prompt_content)
+
+def execute_sql(query: str):
+    df = pd.read_sql(text(query), engine)    
+    json_data = df.to_json(orient="records", force_ascii=False)
+    return json_data
+
+def run_data_gathering(state):
+    sqls = get_data_gathering_sql(state["user_query"], state["rag_schema_context"])
+    
+    # Save SQL queries to a JSON file
+    sql_queries_file_path = save_sql_queries_to_json(sqls, state["session_id"])
+
+    full_results = {
+        x["table"]: execute_sql(x["sql"]) 
+        for x in sqls
+    }
+    
+    # Save full results to a JSON file
+    results_file_path = save_sql_results_to_json(full_results, state["session_id"])
+    
+    return full_results, results_file_path, sql_queries_file_path
+
+def run_generate_python_code(state, full_sql_results, results_file_path, sql_queries_file_path, max_retries=3):
+    # Extract head(10) for each table result
+    results_head = {}
+    for table_name, json_data in full_sql_results.items():
+        df = pd.read_json(io.StringIO(json_data)) # Use io.StringIO to suppress FutureWarning
+        results_head[table_name] = df.head(10).to_json(orient="records", force_ascii=False)
+    
+    python_code = ""
+    for retry_count in range(max_retries):
+        error_feedback = state.get("error_message") if retry_count > 0 else None
+        
+        python_code = get_python_code(state["user_query"], results_head, results_file_path, sql_queries_file_path, error_feedback)
+
+        # save python code
+        output_dir = "python_codes"
+        os.makedirs(output_dir, exist_ok=True)
+        file_path = os.path.join(output_dir, f"{state['session_id']}_{retry_count}.py")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(python_code)
+        
+        try:
+            # Attempt to execute the generated Python code
+            local_env = {}
+            exec(python_code, {}, local_env)
+            print("Generated Python code executed successfully (simulated).")
+            state["error_message"] = None # Clear error message on success
+            return python_code
+        except Exception as e:
+            error_message = f"Python code execution failed: {e}"
+            print(error_message)
+            state["error_message"] = error_message
+            if retry_count < max_retries - 1:
+                print(f"Retrying Python code generation... (Attempt {retry_count + 1}/{max_retries})")
+            else:
+                print("Max retries reached. Could not generate executable Python code.")
+                return python_code # Return the last generated code even if it failed
+    return python_code
 
 def run_dynamic_code(code: str, context: dict = None):
     local_env = {}
-    
-    # Redirect stdout to capture print statements
-    old_stdout = sys.stdout
-    redirected_output = StringIO()
-    sys.stdout = redirected_output
-    
-    try:
-        exec(code, context or {}, local_env)
-        captured_output = redirected_output.getvalue()
-    finally:
-        sys.stdout = old_stdout # Restore stdout
-    
-    return {"local_env": local_env, "captured_output": captured_output}
-
+    exec(code, context or {}, local_env)
+    return local_env
 
 # === GLOBAL VARIABLES ===
-BUSINESS_RULES_FOR_SQL_GENERATION = """
+BUSINESS_RULES = """
 * Data Relationship Summary
 - Creator's name can be found in `t_member.nickname`.
 - `t_member.no` joins with `t_creator.member_no`.
@@ -105,170 +174,194 @@ BUSINESS_RULES_FOR_SQL_GENERATION = """
 - Churner: A member whose membership ends within a given period and does not restart within 3 days (subject to the grace period rule above).
 - Cancellation Booker: A member who has a cancellation scheduled (`중단예약=T`) as of the aggregation snapshot time.
 - Re-subscriber after Churn: A member who starts a new membership within a given period, and had a previous membership that ended more than 3 days before the new start date.
+
+* Weekly Active Member Calculation (Snapshot-based):
+- To count weekly active members, the query must first generate a series of dates representing the snapshot time for each week (Sunday at 23:59:59) within the requested period.
+- A recursive CTE is the required method for generating this date series.
+- For each snapshot date, the query must count the number of distinct members whose continuous membership 'Block' (calculated as per the rules below) was active on that date.
+- A member is considered active on a snapshot date if the snapshot date is between the `start_date` and `end_date` of their membership block (inclusive).
+- The final output should be the snapshot date (or week identifier) and the corresponding count of active members.
+
+* Membership Block, Edition, and Month Count Rules
+- **Core Concept**: When analyzing user retention or continuous membership, individual `t_fanding_log` records must be grouped into continuous 'Blocks'. A simple date range check on individual logs is incorrect as it can misinterpret short breaks as churn.
+- Continuous Subscription: A new membership log in `t_fanding_log` is considered part of the same block if it starts within 3 days of the previous log's end date for the same `fanding_no`. A gap of 4 days or more signifies a new block.
+- **SQL Implementation Hint**: To correctly group logs into blocks, a multi-step process using CTEs is required:
+  1.  **Order Logs**: Use `LAG(end_date, 1) OVER (PARTITION BY fanding_no ORDER BY start_date)` to get the previous log's end date (`prev_end_date`). Note: MariaDB `LAG` function should be used with the `LAG(expression, offset)` syntax.
+  2.  **Flag New Blocks**: Create a flag (`new_block_flag`) using a `CASE` statement. A new block starts if `prev_end_date` is NULL or if `start_date >= DATE_ADD(prev_end_date, INTERVAL 4 DAY)`.
+  3.  **Group Blocks**: Use a cumulative `SUM(new_block_flag)` over the same window function to assign a unique `block_no` to each block.
+  4.  **Finalize Blocks**: `GROUP BY fanding_no, block_no` and find the `MIN(start_date)` and `MAX(end_date)` to get the final start and end date for each block.
+- **Final Analysis**: All retention, active user counts, and churn analysis must be performed on these calculated blocks, not on the raw `t_fanding_log` entries.
+- Free Coupon Usage: If `t_fanding_log.coupon_member_no` is not NULL, it indicates the membership was started with a coupon. This is considered the beginning of a new block and the first Edition (회차 0).
+- Edition (회차): The number of payments made within a single block. The count starts from 0 for a coupon-based start.
+- Month Count (개월차): The number of months a block has been active, calculated from the block's start date.
 """
 
-BUSINESS_RULES_FOR_PYTHON_GENERATION = """
-* Data Relationship Summary
-- Creator's name can be found in `t_member.nickname`.
-- `t_member.no` joins with `t_creator.member_no`.
-- `t_creator.no` joins with `t_payment.seller_creator_no`.
-- `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.
+PROMPT_DATA_GATHERING = """
+You are an expert SQL generator for the Fanding platform.
+You will receive two inputs:
+1. A user's natural language query (`user_query`)
+2. The database schema (`rag_schema_context`)
 
-* Aggregation Timeframes:
-- Daily: 00:00:00 to 23:59:59. Snapshot at 23:59:59.
-- Weekly: Monday 00:00:00 to Sunday 23:59:59. Snapshot at Sunday 23:59:59.
-- Monthly: First day of the month 00:00:00 to last day of the month 23:59:59. Snapshot at last day 23:59:59.
+---
 
-* Payment Data Rules
-- Completed Payment: `status` is NOT 'W' (Waiting) or 'F' (Failed), and `pay_datetime` is not NULL.
-- Refund: `status` is 'R' (Full Refund) or 'P' (Partial Refund).
-  - 'R' (Full Refund): The member is considered to have no experience, and the payment is excluded from the installment count.
-  - 'P' (Partial Refund): The member has some experience, and the payment is included in the installment count.
-- Actual sales amount must be calculated using `remain_price`. The `price` column should NOT be used.
-- When analyzing sales, you must include statuses 'T' (Approved) and 'P' (Partially Refunded).
-- Currency Conversion:
-  - For KRW (currency_no = 1): use `remain_price`.
-  - For USD (currency_no = 2): use `remain_price` * 1360.
-  - For HEAT (currency_no is NULL): use `remain_heat` * 110.
-
-* Membership Block Logic (Crucial for Retention & New Member Analysis)
-- **Concept**: Analysis is performed on 'Blocks', not raw logs. A Block represents a continuous period of subscription.
-- **Block Creation Rules**:
-  1. Sort `t_fanding_log` by `member_no` and `start_date`.
-  2. A new Block starts if:
-     - It is the member's first record.
-     - OR `start_date` > (`prev_end_date` + 3 days). (A gap of 4 days or more).
-     - OR `coupon_member_no` is NOT NULL. (Using a coupon always starts a new Block, regardless of the date gap).
-  3. Consecutive logs with a gap of 3 days or less (and no coupon) are merged into a single Block (min start_date to max end_date).
-
-* Metric Definitions
-- **New Member (Monthly)**: A member who has a Block with a `real_start_date` falling within that month. This INCLUDES returning members who started a new Block after a churn period.
-- **Existing Member (Monthly)**: A member whose Block covers the snapshot time (Last Day of Month 23:59:59).
-  - Logic: `real_start_date` <= Month_End_Date AND `real_end_date` >= Month_End_Date.
-- **Churner**: A member whose Block ends within the period and does not start a new Block within 3 days.
-- **Active Member Grace Period**: Only applicable when analyzing the 'Current' unfinished month. If the current date is within 3 days of a Block's end date, the member is still considered active. For historical months, use the strict Block dates.
-"""
-
-PROMPT_SEARCH_RELATIVE_TABLES = """
-주어진 사용자 질문에 답하기 위해 반드시 필요한 데이터 테이블 목록과 이유를 반환합니다.
-출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
-
-사용자 질문:
+## User Query
 {user_query}
 
-사용할 수 있는 데이터 테이블 목록:
+---
+
+## Database Schema
 {rag_schema_context}
 
-출력 형식:
+---
+
+## Business Rules
+{business_rules}
+
+### 🎯 Your Task
+Generate **raw-level SQL queries** for each relevant table in the database
+based on the user's request.
+
+Each query must follow these strict rules:
+1. **JOIN은 원칙적으로 사용하지 않는다.**  
+   - 한 쿼리에서는 하나의 테이블만 조회한다.  
+   - 단, 다음과 같은 경우에만 최소한의 JOIN을 허용한다:  
+     - 사용자가 이름, 닉네임 등으로 데이터를 요청했는데  
+       그 정보가 현재 테이블이 아닌 다른 테이블에 있을 때.  
+     - 예: 크리에이터 정보(`t_creator`)를 닉네임(`t_member.nickname`)으로 조회해야 하는 경우.  
+       → `t_creator c JOIN t_member m ON c.member_no = m.no`  
+
+2. **집계, 요약, 통계 금지**  
+   - `SUM`, `COUNT`, `AVG`, `MAX`, `MIN`, `GROUP BY` 등의 함수는 사용하지 않는다.  
+   - 오직 개별 레코드(원본 행)만 조회한다. 
+
+3. **필요한 조건만 WHERE로 제한**  
+   - 사용자 요청에 날짜, 이름, ID 등의 조건이 있다면 WHERE 절에 포함시킨다.  
+   - 예: `"8월 매출"` → `WHERE pay_datetime BETWEEN '2025-08-01' AND '2025-08-31'`  
+   - 예: `"강환국 작가"` → `JOIN t_member` 후 `m.nickname LIKE '%강환국%'`  
+
+4. **SELECT * 사용**  
+   - 가능하면 `SELECT *`를 사용하되, JOIN을 사용하는 경우엔 `테이블별 alias.*` 형식 사용  
+     (예: `SELECT c.* FROM t_creator c JOIN t_member m ...`)  
+
+5. **출력 형식은 JSON 배열로 반환**  
+   - 각 객체는 다음 형태를 따른다:  
+     ```json
+     {{
+       "table": "<테이블 이름>",
+       "sql": "<SQL 문장>"
+     }}
+     ```  
+   - 여러 테이블이 관련 있을 경우, JSON 리스트로 여러 쿼리를 포함시킨다.  
+   - **설명, 주석, 마크다운, 텍스트를 추가하지 않는다.**  
+   - 결과는 유효한 JSON이어야 한다. (파싱 가능한 구조)
+
+6. **반드시 `rag_schema_context`를 근거로 쿼리문을 작성한다.**
+   - 스키마에 정의되지 않은 컬럼이나 테이블은 사용하지 않는다.
+---
+
+### 🧾 Example Behavior
+
+**Example**
+User query:  
+> "A 크리에이터의 8월 매출 데이터를 보여줘."
+
+Expected Output:
 ```json
 [
-    {{ "table": <테이블명>, "schema": [{{"column": <컬럼명>, "type": <자료형>, "description": <설명>}}, ...], "reason": <테이블 선택 이유> }},
-    ...
+  {{
+    "table": "t_payment",
+    "sql": "SELECT * FROM t_payment WHERE pay_datetime BETWEEN '2025-08-01' AND '2025-08-31';"
+  }},
+  {{
+    "table": "t_creator",
+    "sql": "SELECT c.* FROM t_creator c JOIN t_member m ON c.member_no = m.no WHERE m.nickname LIKE '%A%';"
+  }}
 ]
 ```
 """
 
-PROMPT_GENERATE_SQL_QUERY = f"""
-이후의 작업 절차는 다음과 같습니다.
-1. SQL 쿼리문 작성: 필요한 데이터를 추출할 수 있는 SQL 쿼리문을 작성합니다.
-2. Python 코드 작성: 해당 SQL문을 실행하여 데이터를 가져오고 전처리한 뒤 사용자 질문에 맞는 적절한 JSON 형태의 결과를 반환하는 Python 코드를 작성합니다.
-
-이번 단계에는 `1. SQL 쿼리문 작성` 을 진행합니다.
-출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
-
-파이썬에서 SQL문을 실행할 수 있는 코드는 다음과 같습니다.
-
-```python
-import pandas
-from sqlalchemy import create_engine, text
-
-engine = create_engine(
-    f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset={DB_CHARSET}",
-    echo=False  # SQL 로그를 보고 싶으면 True
-)
-query = "SELECT 1;"
-df = pd.read_sql(text(query), engine)    
-```
-
-아래 규칙에 따라 `query` 문에 들어갈 SQL 쿼리문을 작성합니다.
-
-규칙:
-- MariaDB 문법을 따른다.
-- `SUM`, `COUNT`, `AVG`, `MAX`, `MIN`, `GROUP BY` 등의 집계, 요약, 통계 함수는 사용하지 않는다.  
-- 사용자 질문에 날짜, 이름, ID 등의 조건이 있다면 WHERE 절에 포함시킨다.
-- alias(AS 문법) 사용 시 반드시 백틱(`)으로 감싸 예약어와 혼동되지 않게한다.
-- `비즈니스 규칙`을 따른다.
-
-비즈니스 규칙:
-{{business_rules}}
-
-출력 형식:
-```json
-[ {{{{ "query_name": "<SQL 쿼리명>", "sql": "<SQL 문장>" }}}}, ... ]
-```  
-"""
-
-PROMPT_VALIDATE_SQL_QUERY = """
-생성한 SQL 쿼리문들이 아래의 규칙들을 잘 지키는지 검증하고 종합하여 최종 판단을 내립니다.
-출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
-
-1. (비즈니스 규칙 검증) 비즈니스 규칙을 잘 따르고 있는가? `예` 또는 `아니오`
-2. (정합성 검증) 앞에서 구한 테이블 목록에 없는 테이블이나 컬럼을 사용했는가?  `예` 또는 `아니오`
-3. (정합성 검증) MariaDB에서 동작하지 않는 문법을 사용했는가?  `예` 또는 `아니오`
-
-출력 형식:
-```json
-{{"is_valid": <True 또는 False>, "feedback": <True인 경우 빈 문자열, False인 경우 검증 결과를 바탕으로 쿼리문을 개선하기 위해 필요한 내용>}}
-```
-"""
-
 PROMPT_GENERATE_PYTHON_CODE = """
-이번 단계에는 `2. 파이썬 코드 작성` 을 진행합니다.
+You are an expert data analyst and Python developer.
+You are working with data extracted from the Fanding platform database.
+You will be given:
+1. The user's natural language request (`user_query`)
+2. The retrieved SQL results as JSON data from multiple tables (`results`)
 
-`1. SQL 쿼리문 작성` 단계에서 생성한 쿼리문들을 활용하여 사용자 질문에 따라 실제의 데이터를 분석하거나 비교하는 실행 가능한 파이썬 코드를 작성합니다.
-반드시 아래 규칙을 따라야 합니다.
+Your goal is to write Python code that performs analysis on this data
+and produces outputs that fully answer the user's request.
 
-규칙:
+---
 
-- (더미 데이터 사용 금지) 그럴듯한 데이터를 더미, 테스트 용도로 사용하지 않는다.
+## User Query
+{user_query}
 
-- (데이터 불러오기) 실제 데이터베이스에 연결하고 앞 단계에서 생성한 SQL 쿼리문들을 활용하여 필요한 데이터를 `pandas.DataFrame` 형태로 가져온다.
-  - 데이터 로딩 후 불필요한 DataFrame 복사(copy())는 하지 않는다.
-  - datetime 변환은 필요한 컬럼만 최소한으로 적용한다.
+---
 
-- (데이터 병합 및 가공) 사용자 질문의 요구사항에 맞게 필요한 테이블을 merge 또는 boolean filtering 한다.
-  - merge 시 필요한 컬럼만 선택하여 메모리 사용량과 실행 시간을 줄인다.
-  - 가능할 경우 merge → groupby 순으로 최소한의 파이프라인을 구성한다.
+## SQL Query Results (by table) - Head(10)
+{results_head}
 
-- (집계 / 분석 / 비교) 사용자 질문에 대한 적절한 답변을 생성하기 위해 "집계", "분석", "비교" 등의 작업을 진행한다.
-  - groupby는 한 번에 필요한 집계를 수행하여 중복 groupby 호출을 최소화한다.
-  - row 단위 apply(axis=1)는 절대 사용하지 않는다.
-    - 대신 pandas의 벡터 연산 또는 np.where / Series.map 등을 사용해 계산한다.
+## Full SQL Query Results File Path
+{results_file_path}
 
-- (시각화) 시각적 비교나 트렌드가 필요한 경우 matplotlib 또는 seaborn을 활용한다.
-  - 시각화는 최소한의 데이터만 사용하여 불필요한 연산을 방지한다.
-  - 그래프 출력은 선택적이며 반드시 `plt.show()`로 끝내야 한다.
-  - matplotlib 사용 시 한국어 깨짐 방지를 위해 아래의 코드를 삽입한다.
+## SQL Queries File Path
+{sql_queries_file_path}
 
-```py
-plt.rcParams['font.family'] = 'Malgun Gothic'
-plt.rcParams['axes.unicode_minus'] = False
-```
+---
 
-* (보안 및 안정성) 외부 API 호출, 파일 저장, 시스템 명령어 사용 등은 금지한다. pandas, matplotlib, numpy 등 기본 라이브러리만 사용한다.
+### 🎯 Your Task
+Write **executable Python code** that analyzes or compares the data according to the user's request.
 
-* (비즈니스 규칙) 아래의 `비즈니스 규칙`을 따른다.
+Follow these rules carefully:
 
-비즈니스 규칙:
-{{business_rules}}
+1. **데이터 불러오기**
+   - `results_file_path`는 전체 SQL 쿼리 결과가 저장된 JSON 파일의 경로이다.
+   - `results_file_path`를 사용하여 전체 데이터를 로드하고, 각 테이블 데이터를 `pandas.DataFrame`으로 변환해야 한다.
+     ```python
+     import json
+     import pandas as pd
 
-* (출력 형식) 함수 정의, 변수명, 주석을 포함한 실행 가능한 코드를 작성한다.
+     with open(results_file_path, 'r', encoding='utf-8') as f:
+         full_results = json.load(f)
+     
+     df_payment = pd.DataFrame(json.loads(full_results["t_payment"]))
+     df_creator = pd.DataFrame(json.loads(full_results["t_creator"]))
+     ```
+   - 테이블 이름에 따라 자동으로 DataFrame 변수를 생성하라.
 
-  * 주요 결과는 반드시 `print()`로 출력한다.
-  * 설명 문장이나 해설을 출력하지 말고 코드만 반환한다.
+2. **데이터 병합 및 가공**
+   - `user_query`의 요구사항에 맞게 필요한 테이블을 병합(merge)하거나 필터링한다.
+   - JOIN 조건은 스키마(`rag_schema_context`)를 기반으로 합리적으로 설정한다.
+     예: `t_payment.seller_creator_no = t_creator.no`, `t_fanding.member_no = t_member.no`
+   - 기간, 이름, 크리에이터, 멤버 등과 관련된 필터 조건을 적용한다.
 
-출력 예시:
+3. **집계 / 분석 / 비교**
+   - 사용자 요청이 “분석”, “비교”, “성과” 등과 관련될 경우,
+     단순 집계(예: `groupby`, `value_counts`, `mean`)를 수행한다.
+   - 예를 들어, “8월 매출 비교”라면 크리에이터별 합계(price)를 계산한다.
+   - 단, LLM이 임의로 수치를 만들면 안 되며, DataFrame 내 데이터를 기준으로만 계산한다.
 
+4. **시각화 (선택)**
+   - 시각적 비교나 트렌드가 필요한 경우 matplotlib 또는 seaborn을 활용한다.
+   - 그래프 출력은 선택적이며, `plt.show()`로 끝내야 한다.
+
+5. **출력 형식**
+   - 코드 내에서 `print()`를 통해 주요 결과를 명시적으로 출력하라.
+   - 함수 정의, 변수명, 주석을 포함한 **완전한 실행 가능한 코드**를 작성한다.
+   - 설명 문장이나 해설은 출력하지 말고, 코드만 반환한다.
+
+6. **보안 및 안전성**
+   - 외부 API 호출, 파일 저장, 시스템 명령어 사용 등은 금지한다.
+   - pandas, matplotlib, numpy 등 기본 라이브러리만 사용 가능하다.
+
+---
+
+### 🧾 Example Behavior
+
+**Example 1**  
+User query:  
+> "A 크리에이터와 B 크리에이터의 8월 매출을 비교해줘."
+
+Expected Output:
 ```python
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -302,23 +395,48 @@ plt.xlabel("크리에이터")
 plt.ylabel("매출 금액")
 plt.show()
 ```
-"""
 
-PROMPT_GENERATE_FINAL_RESULT = """
-최종적으로 구한 결과물로 사용자가 쉽게 이해할 수 있는 구조의 응답을 작성해줘.
-응답 내용 이외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
+---
 
-파이썬 코드 실행 결과:
-{python_execution_result}
+### ⚙️ Output Format
 
-규칙:
-- 반드시 존댓말을 사용한다.
-- 작업 과정 중 발생한 오류나 해결과정 등 사용자에게 별도로 알림이 필요한 내용은 추가한다.
-- 마지막으로, 새 질문이나 이번 질문에 대한 추가 질문 등을 유도하는 파트를 추가한다.
+- Return **only executable Python code**, no markdown, no commentary.
+
+- Do not include explanation, quotes, or code fences.
+
+- Use only `results`, `pandas`, and `matplotlib` (optional).
+
+---
+
+**Now generate Python code that performs the data analysis for the given user query and results.**
+
+---
+
+## ✅ 프롬프트 구조 요약
+
+| 섹션 | 설명 |
+|------|------|
+| **입력** | `{{user_query}}`, `{{results}}` |
+| **핵심 작업** | `pandas`로 JSON 로드 → 병합 → 분석 → 출력 |
+| **규칙** | JOIN은 DataFrame merge로 수행, 외부 API 금지 |
+| **출력** | 완전한 Python 코드만, markdown 금지 |
+| **예시** | 8월 매출 비교 케이스 포함 |
+
+---
+
+## ✅ (선택) — 자동 포맷팅용 파이썬 함수 예시
+
+```python
+def make_python_generation_prompt(state, results):
+    return PROMPT_PYTHON_GENERATION.format(
+        user_query=state["user_query"],
+        results=json.dumps(results, ensure_ascii=False, indent=2)
+    )
+```
 """
 
 STATE = {
-    "user_query": "25년 11월 '강환국 작가', '고래돈공부' 크리에이터의 월 성과 및 팬덤 만족도를 분석하고 비교해줘.",
+    "user_query": "25년 8월 전체 멤버십 가입자 수와 '강환국 작가', '고래돈공부' 크리에이터의 월 성과를 분석하고 비교해줘.",
     "user_id": None,
     "channel_id": None,
     "session_id": "ebe64650-26e5-4d0d-bf9a-21b80d0133e2",
@@ -326,12 +444,12 @@ STATE = {
         "user_id": None,
         "channel_id": None
     },
-    "normalized_query": "25년 11월 '강환국 작가', '고래돈공부' 크리에이터의 월 성과 및 팬덤 만족도를 분석하고 비교해줘.",
+    "normalized_query": "25년 8월 전체 멤버십 가입자 수와 '강환국 작가', '고래돈공부' 크리에이터의 월 성과를 분석하고 비교해줘.",
     "intent": "COMPLEX_ANALYSIS",
     "llm_intent_result": {
         "intent": "COMPLEX_ANALYSIS",
         "confidence": 0.95,
-        "reasoning": "전체 멤버십 가입자 수는 단순 집계이지만, 특정 크리에이터들의 '월 성과 및 팬덤 만족도를 분석하고 비교'"
+        "reasoning": "전체 멤버십 가입자 수는 단순 집계이지만, 특정 크리에이터들의 '월 성과를 분석하고 비교'"
     },
     "entities": [
         # NOTE: 이전 단계에서 사용할 테이블까지도 뽑아줌 -> 실패 시 테이블 선택 단계까지 돌아가야.
