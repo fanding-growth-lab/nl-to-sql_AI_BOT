@@ -28,12 +28,12 @@ with engine.connect() as conn:
 
 
 # === GEMINI CONFIG ===
-from google import genai
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-client = genai.Client(api_key=GOOGLE_API_KEY)
-chat = client.chats.create(model='gemini-2.5-flash')
+# LangChain 모델 초기화
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY)
 
 
 # === GLOBAL FUNCTIONS ===
@@ -63,13 +63,17 @@ def run_dynamic_code(code: str, context: dict = None):
     redirected_output = StringIO()
     sys.stdout = redirected_output
     
+    error = None
+    captured_output = None
     try:
         exec(code, context or {}, local_env)
         captured_output = redirected_output.getvalue()
+    except Exception as e:
+        error = e
     finally:
         sys.stdout = old_stdout # Restore stdout
     
-    return {"local_env": local_env, "captured_output": captured_output}
+    return {"local_env": local_env, "captured_output": captured_output, "error": error}
 
 
 # === GLOBAL VARIABLES ===
@@ -79,11 +83,16 @@ BUSINESS_RULES_FOR_SQL_GENERATION = """
 - `t_member.no` joins with `t_creator.member_no`.
 - `t_creator.no` joins with `t_payment.seller_creator_no`.
 - `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.
+- `t_post.member_no` represents the Creator (Uploader).
+- `t_post_view_log.member_no` represents the Viewer.
 
 * Aggregation Timeframes:
 - Daily: 00:00:00 to 23:59:59. Snapshot at 23:59:59.
 - Weekly: Monday 00:00:00 to Sunday 23:59:59. Snapshot at Sunday 23:59:59.
 - Monthly: First day of the month 00:00:00 to last day of the month 23:59:59. Snapshot at last day 23:59:59.
+
+* Data Query Scope (CRITICAL for Continuity)
+- Historical Data Requirement: To correctly identify whether a block starting on the 1st of the target month is a "New" subscription or a "Renewal", you MUST query data starting at least 1 month prior to the target analysis start date.
 
 * Payment Data Rules
 - Completed Payment: `status` is NOT 'W' (Waiting) or 'F' (Failed), and `pay_datetime` is not NULL.
@@ -97,14 +106,22 @@ BUSINESS_RULES_FOR_SQL_GENERATION = """
   - For USD (currency_no = 2): use `remain_price` * 1360.
   - For HEAT (currency_no is NULL): use `remain_heat` * 110.
 
-* Member and Membership Aggregation Rules
-- Active Member & Churn Grace Period: This is a special rule that applies ONLY IF the aggregation date is within 3 days of the CURRENT DATE.
-  - Rule: A member is considered 'Active' (not churned) even if their membership has ended, as long as the end date is within 3 days of the aggregation date.
-  - Example: If today is Oct 2nd and we are aggregating data for Oct 1st, a member whose subscription ended on Oct 1st is still considered active. If we are aggregating data for Sep 15th, this rule does not apply.
-- New Subscriber: A member who starts a membership within a given period and has no prior membership history.
-- Churner: A member whose membership ends within a given period and does not restart within 3 days (subject to the grace period rule above).
-- Cancellation Booker: A member who has a cancellation scheduled (`중단예약=T`) as of the aggregation snapshot time.
-- Re-subscriber after Churn: A member who starts a new membership within a given period, and had a previous membership that ended more than 3 days before the new start date.
+* Post & Activity Analysis Rules (CRITICAL for Accuracy)
+- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.
+  - **Logic**: `t_post.del_datetime` IS NULL.
+- **Audience Validity (No Self-Views)**: When calculating "Visitors", "Views", or "Visit Rate", you MUST exclude the Creator's own activity.
+  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).
+- **Visit Rate Calculation**:
+  - Numerator: Unique Viewers (excluding Creator).
+  - Denominator: Total Active Members (at snapshot).
+
+* Activity & Engagement Metric Definitions (CRITICAL for Matching Reference Standards)
+- **Average Daily Visitors (Monthly)**:
+  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.  
+- **Visit Rate (%)**:
+  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.
+- **Top Posts (Monthly)**:
+  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count.
 """
 
 BUSINESS_RULES_FOR_PYTHON_GENERATION = """
@@ -113,11 +130,17 @@ BUSINESS_RULES_FOR_PYTHON_GENERATION = """
 - `t_member.no` joins with `t_creator.member_no`.
 - `t_creator.no` joins with `t_payment.seller_creator_no`.
 - `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.
+- `t_post.member_no` represents the Creator (Uploader).
+- `t_post_view_log.member_no` represents the Viewer.
 
 * Aggregation Timeframes:
 - Daily: 00:00:00 to 23:59:59. Snapshot at 23:59:59.
 - Weekly: Monday 00:00:00 to Sunday 23:59:59. Snapshot at Sunday 23:59:59.
 - Monthly: First day of the month 00:00:00 to last day of the month 23:59:59. Snapshot at last day 23:59:59.
+
+* Data Query Scope (CRITICAL for Continuity)
+- Historical Data Requirement: To correctly identify whether a block starting on the 1st of the target month is a "New" subscription or a "Renewal", you MUST query data starting at least 1 month prior to the target analysis start date.
+- Filtering: Load the extended dataset first to construct Blocks, then filter for the target analysis period during the aggregation step.
 
 * Payment Data Rules
 - Completed Payment: `status` is NOT 'W' (Waiting) or 'F' (Failed), and `pay_datetime` is not NULL.
@@ -130,6 +153,15 @@ BUSINESS_RULES_FOR_PYTHON_GENERATION = """
   - For KRW (currency_no = 1): use `remain_price`.
   - For USD (currency_no = 2): use `remain_price` * 1360.
   - For HEAT (currency_no is NULL): use `remain_heat` * 110.
+
+* Post & Activity Analysis Rules (CRITICAL for Accuracy)
+- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.
+  - **Logic**: `t_post.post_del_datetime` IS NULL.
+- **Audience Validity (No Self-Views)**: When calculating "Visitors", "Views", or "Visit Rate", you MUST exclude the Creator's own activity.
+  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).
+- **Visit Rate Calculation**:
+  - Numerator: Unique Viewers (excluding Creator).
+  - Denominator: Total Active Members (at snapshot).
 
 * Membership Block Logic (Crucial for Retention & New Member Analysis)
 - **Concept**: Analysis is performed on 'Blocks', not raw logs. A Block represents a continuous period of subscription.
@@ -141,16 +173,36 @@ BUSINESS_RULES_FOR_PYTHON_GENERATION = """
      - OR `coupon_member_no` is NOT NULL. (Using a coupon always starts a new Block, regardless of the date gap).
   3. Consecutive logs with a gap of 3 days or less (and no coupon) are merged into a single Block (min start_date to max end_date).
 
-* Metric Definitions
-- **New Member (Monthly)**: A member who has a Block with a `real_start_date` falling within that month. This INCLUDES returning members who started a new Block after a churn period.
-- **Existing Member (Monthly)**: A member whose Block covers the snapshot time (Last Day of Month 23:59:59).
-  - Logic: `real_start_date` <= Month_End_Date AND `real_end_date` >= Month_End_Date.
+* Membership Metric Definitions
+- **New Member (Monthly)**: Total number of subscription Blocks that started (`real_start_date`) within the target month.
+  - **Definition**: This INCLUDES returning members who churned and then started a new Block within the same month.
+  - **Technical Rule**: Use `len()` (row count) of the filtered blocks DataFrame, **NOT** `nunique()` of `member_no`. Counting unique members will incorrectly undercount re-joining events.  
+- **Existing(Active) Member (Monthly)**: Total number of unique members active at the month-end snapshot.
+  - **Logic**: `real_start_date` <= Month_End_Date AND `real_end_date` > Month_End_Date.
+  - **Technical Rule**: Use `nunique()` of `member_no` (Headcount).
 - **Churner**: A member whose Block ends within the period and does not start a new Block within 3 days.
 - **Active Member Grace Period**: Only applicable when analyzing the 'Current' unfinished month. If the current date is within 3 days of a Block's end date, the member is still considered active. For historical months, use the strict Block dates.
+
+* Activity & Engagement Metric Definitions (CRITICAL for Matching Reference Standards)
+- **Average Daily Visitors (Monthly)**:
+  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.
+  - **Logic**: First, group by `view_date` to count unique `viewer_member_no` (DAU). Then, calculate the `.mean()` of these daily counts.
+  - **Restriction**: Do NOT calculate the average visitors per post.
+  
+- **Visit Rate (%)**:
+  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.
+  - **Numerator**: The count of unique members who appear in BOTH the `Active Existing Members (Month-End)` list AND the `Post View Log` for that month (Intersection).
+  - **Denominator**: The count of `Active Existing Members (Month-End)`.
+  - **Logic**: `(Intersection_Count / Active_Members_Count) * 100`. Do not use total monthly visitors as the numerator (it includes non-members/churners).
+
+- **Top Posts (Monthly)**:
+  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count.
+  - **Logic**: Join `t_post` and `t_post_view_log`. Filter where `post.ins_datetime` and `post_view_log.ins_datetime` are within the target month. Then rank by `viewer_member_no.nunique()`.
 """
 
 PROMPT_SEARCH_RELATIVE_TABLES = """
 주어진 사용자 질문에 답하기 위해 반드시 필요한 데이터 테이블 목록과 이유를 반환합니다.
+관련 테이블의 컬럼은 누락 없이 모두 반환합니다.
 출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
 
 사용자 질문:
@@ -169,14 +221,93 @@ PROMPT_SEARCH_RELATIVE_TABLES = """
 """
 
 PROMPT_GENERATE_SQL_QUERY = f"""
-이후의 작업 절차는 다음과 같습니다.
-1. SQL 쿼리문 작성: 필요한 데이터를 추출할 수 있는 SQL 쿼리문을 작성합니다.
-2. Python 코드 작성: 해당 SQL문을 실행하여 데이터를 가져오고 전처리한 뒤 사용자 질문에 맞는 적절한 JSON 형태의 결과를 반환하는 Python 코드를 작성합니다.
-
-이번 단계에는 `1. SQL 쿼리문 작성` 을 진행합니다.
+사용자 질문과 관련 테이블 정보를 바탕으로 필요한 데이터를 추출할 수 있는 SQL 쿼리문을 작성합니다.
 출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
 
-파이썬에서 SQL문을 실행할 수 있는 코드는 다음과 같습니다.
+사용자 질문:
+{{user_query}}
+
+관련 테이블 정보:
+{{relative_tables}}
+
+비즈니스 규칙:
+{{business_rules}}
+
+{{sql_feedback}}
+
+규칙:
+- MariaDB 문법을 따른다.
+- 사용자 질문에 날짜, 이름, ID 등의 조건이 있다면 WHERE 절에 포함시킨다.
+- alias(AS 문법) 사용 시 반드시 백틱(`)으로 감싸 예약어와 혼동되지 않게한다.
+- 날짜 조건이 주어지면 앞에 1개월 여유를 두고 조회한다. (예: 8월 신규 가입 여부를 알기 위해선 7월 데이터도 필요) 
+- `비즈니스 규칙`을 따른다.
+
+[필수 체크리스트] - 아래 항목을 위반하면 절대 안됩니다.
+1. 쿼리에 GROUP BY, SUM, COUNT, AVG, MIN, MAX 등의 집계/통계 함수가 포함되어 있지 않은가? (반드시 예, 로우 데이터만 추출해야 함)
+2. 신규 회원/이탈 회원 등을 SQL에서 판단하려고 하지 않았는가? (반드시 예, SQL은 판단 로직 없이 모든 로그를 가져와야 함)
+3. 모든 컬럼을 무작정 조회(SELECT *)하지 않고, 분석에 필요한 컬럼만 명시적으로 선택했는가? (반드시 예)
+
+출력 형식:
+```json
+[ {{{{ "query_name": "<SQL 쿼리명>", "sql": "<SQL 문장>" }}}}, ... ]
+```  
+"""
+
+PROMPT_VALIDATE_SQL_QUERY = """
+생성된 SQL 쿼리문들이 아래의 규칙들을 잘 지키는지 검증하고 종합하여 최종 판단을 내립니다.
+출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
+
+사용자 질문:
+{user_query}
+
+관련 테이블 정보:
+{relative_tables}
+
+비즈니스 규칙:
+{business_rules}
+
+검증할 SQL 쿼리문:
+{sql_queries}
+
+규칙:
+1. (비즈니스 규칙 검증) 비즈니스 규칙을 잘 따르고 있는가? (반드시 예)
+2. (정합성 검증) 관련 테이블 목록에 명시된 테이블이나 컬럼만 사용했는가? (반드시 예)
+3. (정합성 검증) MariaDB에서 정상 동작하는 문법으로 작성했는가? (반드시 예)
+4. (정합성 검증) 날짜 조건이 주어졌다면 앞에 1개월 여유를 두고 조회했는가? (반드시 예, 8월 신규 가입 여부를 알기 위해선 7월 데이터도 필요)
+5. (로우 데이터 추출 여부 검증) GROUP BY, SUM, COUNT, AVG 등 집계 및 통계 함수를 사용하지 않고 로우 데이터만 추출하였는가? (반드시 예)
+6. (최적화 검증) 여러 쿼리로 나누지 않고 가능한 하나의 쿼리로 작성하였는가? (가능하다면 예, t_post_view_log와 같이 무거운 테이블을 여러 쿼리에서 조회하면 효율이 크게 떨어짐)
+
+출력 형식:
+```json
+{{"is_valid": <True 또는 False>, "feedback": <True인 경우 빈 문자열, False인 경우 검증 결과를 바탕으로 쿼리문을 개선하기 위해 필요한 내용>}}
+```
+"""
+
+PROMPT_GENERATE_PYTHON_CODE = f"""
+사용자 질문, 관련 테이블 정보, SQL 쿼리문들을 활용하여 실제의 데이터를 분석하거나 비교하는 실행 가능한 파이썬 코드를 작성합니다.
+출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
+
+사용자 질문:
+{{user_query}}
+
+관련 테이블 정보:
+{{relative_tables}}
+
+비즈니스 규칙:
+{{business_rules}}
+
+SQL 쿼리문:
+{{sql_queries}}
+
+{{python_feedback}}
+
+규칙:
+- (실제 데이터로 정상 동작하는 코드 작성) 더미 데이터나 테스트용 코드를 작성하지 않고 실제 데이터로 정상 동작하는 코드를 작성한다. 
+
+- (데이터 불러오기) 주어진 SQL 쿼리문들을 활용하여 실제 데이터베이스에서 필요한 데이터를 `pandas.DataFrame` 형태로 가져온다.
+  - 데이터 로딩 후 불필요한 DataFrame 복사(copy())는 하지 않는다.
+  - datetime 변환은 필요한 컬럼만 최소한으로 적용한다.
+  - 아래 파이썬 코드를 사용해 데이터베이스에 연결하고 SQL문을 실행한다.
 
 ```python
 import pandas
@@ -189,52 +320,6 @@ engine = create_engine(
 query = "SELECT 1;"
 df = pd.read_sql(text(query), engine)    
 ```
-
-아래 규칙에 따라 `query` 문에 들어갈 SQL 쿼리문을 작성합니다.
-
-규칙:
-- MariaDB 문법을 따른다.
-- `SUM`, `COUNT`, `AVG`, `MAX`, `MIN`, `GROUP BY` 등의 집계, 요약, 통계 함수는 사용하지 않는다.  
-- 사용자 질문에 날짜, 이름, ID 등의 조건이 있다면 WHERE 절에 포함시킨다.
-- alias(AS 문법) 사용 시 반드시 백틱(`)으로 감싸 예약어와 혼동되지 않게한다.
-- `비즈니스 규칙`을 따른다.
-
-비즈니스 규칙:
-{{business_rules}}
-
-출력 형식:
-```json
-[ {{{{ "query_name": "<SQL 쿼리명>", "sql": "<SQL 문장>" }}}}, ... ]
-```  
-"""
-
-PROMPT_VALIDATE_SQL_QUERY = """
-생성한 SQL 쿼리문들이 아래의 규칙들을 잘 지키는지 검증하고 종합하여 최종 판단을 내립니다.
-출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
-
-1. (비즈니스 규칙 검증) 비즈니스 규칙을 잘 따르고 있는가? `예` 또는 `아니오`
-2. (정합성 검증) 앞에서 구한 테이블 목록에 없는 테이블이나 컬럼을 사용했는가?  `예` 또는 `아니오`
-3. (정합성 검증) MariaDB에서 동작하지 않는 문법을 사용했는가?  `예` 또는 `아니오`
-
-출력 형식:
-```json
-{{"is_valid": <True 또는 False>, "feedback": <True인 경우 빈 문자열, False인 경우 검증 결과를 바탕으로 쿼리문을 개선하기 위해 필요한 내용>}}
-```
-"""
-
-PROMPT_GENERATE_PYTHON_CODE = """
-이번 단계에는 `2. 파이썬 코드 작성` 을 진행합니다.
-
-`1. SQL 쿼리문 작성` 단계에서 생성한 쿼리문들을 활용하여 사용자 질문에 따라 실제의 데이터를 분석하거나 비교하는 실행 가능한 파이썬 코드를 작성합니다.
-반드시 아래 규칙을 따라야 합니다.
-
-규칙:
-
-- (더미 데이터 사용 금지) 그럴듯한 데이터를 더미, 테스트 용도로 사용하지 않는다.
-
-- (데이터 불러오기) 실제 데이터베이스에 연결하고 앞 단계에서 생성한 SQL 쿼리문들을 활용하여 필요한 데이터를 `pandas.DataFrame` 형태로 가져온다.
-  - 데이터 로딩 후 불필요한 DataFrame 복사(copy())는 하지 않는다.
-  - datetime 변환은 필요한 컬럼만 최소한으로 적용한다.
 
 - (데이터 병합 및 가공) 사용자 질문의 요구사항에 맞게 필요한 테이블을 merge 또는 boolean filtering 한다.
   - merge 시 필요한 컬럼만 선택하여 메모리 사용량과 실행 시간을 줄인다.
@@ -255,66 +340,56 @@ plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 ```
 
-* (보안 및 안정성) 외부 API 호출, 파일 저장, 시스템 명령어 사용 등은 금지한다. pandas, matplotlib, numpy 등 기본 라이브러리만 사용한다.
+- (보안 및 안정성) 외부 API 호출, 파일 저장, 시스템 명령어 사용 등은 금지한다. pandas, matplotlib, numpy 등 기본 라이브러리만 사용한다.
+  - while문이나 재귀함수 사용 시 무한 loop에 걸리지 않게 꼭 주의한다. 
 
-* (비즈니스 규칙) 아래의 `비즈니스 규칙`을 따른다.
-
-비즈니스 규칙:
-{{business_rules}}
-
-* (출력 형식) 함수 정의, 변수명, 주석을 포함한 실행 가능한 코드를 작성한다.
-
-  * 주요 결과는 반드시 `print()`로 출력한다.
-  * 설명 문장이나 해설을 출력하지 말고 코드만 반환한다.
-
-출력 예시:
-
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# Convert JSON results to DataFrames
-df_payment = pd.DataFrame(results["t_payment"])
-df_creator = pd.DataFrame(results["t_creator"])
-df_member = pd.DataFrame(results["t_member"])
-
-# Merge payment with creator info
-merged = df_payment.merge(df_creator, left_on="seller_creator_no", right_on="no", how="left")
-
-# Filter for August 2025
-merged["pay_datetime"] = pd.to_datetime(merged["pay_datetime"])
-august = merged[
-    (merged["pay_datetime"].dt.month == 8) & (merged["pay_datetime"].dt.year == 2025)
-]
-
-# Filter creators
-target = august[august["name"].isin(["A", "B"])]
-
-# Aggregate sales
-summary = target.groupby("name")["price"].sum().reset_index()
-
-print(summary)
-
-# Optional plot
-plt.bar(summary["name"], summary["price"])
-plt.title("8월 크리에이터별 매출 비교")
-plt.xlabel("크리에이터")
-plt.ylabel("매출 금액")
-plt.show()
-```
+- (출력 형식) 함수 정의, 변수명, 주석을 포함한 실행 가능한 코드를 작성한다.
+  - 주요 결과는 반드시 `print()`로 출력한다.
+  - 설명 문장이나 해설을 출력하지 말고 코드만 반환한다.
 """
 
-PROMPT_GENERATE_FINAL_RESULT = """
-최종적으로 구한 결과물로 사용자가 쉽게 이해할 수 있는 구조의 응답을 작성해줘.
-응답 내용 이외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
+PROMPT_VALIDATE_PYTHON_EXECUTION = """
+생성된 파이썬 코드의 실행 결과가 아래의 규칙들을 잘 지키는지 검증하고 종합하여 최종 판단을 내립니다.
+출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
+
+사용자 질문:
+{user_query}
+
+비즈니스 규칙:
+{business_rules}
+
+파이썬 코드:
+{python_code}
 
 파이썬 코드 실행 결과:
 {python_execution_result}
 
 규칙:
-- 반드시 존댓말을 사용한다.
-- 작업 과정 중 발생한 오류나 해결과정 등 사용자에게 별도로 알림이 필요한 내용은 추가한다.
-- 마지막으로, 새 질문이나 이번 질문에 대한 추가 질문 등을 유도하는 파트를 추가한다.
+1. (비즈니스 규칙 검증) 비즈니스 규칙을 잘 따르고 있는가? (반드시 예)
+  - 특히 "신규 회원", "기존 회원", "이탈" 등의 정의가 복잡한 지표를 단순 집계(groupby)로 처리하지 않고, 규칙에 명시된 로직(예: Block Logic, 날짜 차이 계산 등)을 통해 구현했는가?
+2. (정합성 검증) 사용자 질문의 요구사항에 맞는 데이터 분석 및 비교 작업이 이루어졌는가? (반드시 예)
+3. (최적화 검증) 데이터 로딩 후 불필요한 DataFrame 복사(copy())는 하지 않고 있는가? (반드시 예)
+4. (최적화 검증) merge, group by, apply 함수는 효율을 고려하여 작성되었는가? (반드시 예)
+
+출력 형식:
+```json
+{{"is_valid": <True 또는 False>, "feedback": <True인 경우 빈 문자열, False인 경우 검증 결과를 바탕으로 파이썬 코드를 개선하기 위해 필요한 내용>}}
+```
+"""
+
+PROMPT_GENERATE_FINAL_RESULT = """
+분석된 결과를 바탕으로 사용자에게 전달할 최종 답변을 작성합니다.
+
+분석 결과:
+{python_execution_result}
+
+오류 메시지 (있는 경우):
+{error_message}
+
+작성 가이드:
+1. 분석 결과가 성공적이라면, 주요 수치와 인사이트을 요약하여 친절하게 설명하세요.
+2. 오류가 있다면, 어떤 문제가 있었는지 간략히 언급하세요.
+3. 결과는 마크다운 형식으로 깔끔하게 정리하세요.
 """
 
 STATE = {

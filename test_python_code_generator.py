@@ -1,215 +1,341 @@
-import re
 import json
+import re
+from typing import TypedDict, List, Dict, Any
+
+from langgraph.graph import StateGraph, END
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+
 from test_config import (
-    STATE, 
-    chat, save_result, run_dynamic_code, 
+    llm,
+    STATE,
+    save_result,
+    run_dynamic_code,
     BUSINESS_RULES_FOR_SQL_GENERATION,
     BUSINESS_RULES_FOR_PYTHON_GENERATION,
     PROMPT_SEARCH_RELATIVE_TABLES,
     PROMPT_GENERATE_SQL_QUERY,
     PROMPT_VALIDATE_SQL_QUERY,
-    PROMPT_GENERATE_PYTHON_CODE,    # 따로 검수 X, 에러 발생 시 핸들링
+    PROMPT_GENERATE_PYTHON_CODE,
     PROMPT_GENERATE_FINAL_RESULT,
+    PROMPT_VALIDATE_PYTHON_EXECUTION
 )
 
-def _get_info(state: dict) -> dict:
-    assert state.get("user_query") and state.get("entities") and state.get("rag_schema_context")
-    return {
+
+class AgentState(TypedDict):
+    user_query: str
+    rag_schema_context: str
+    relative_tables: List[Dict[str, Any]]
+    sql_queries: List[Dict[str, str]]
+    sql_validation: Dict[str, Any]
+    python_code: str
+    python_execution_result: str
+    python_validation: Dict[str, Any] # 추가
+    final_result: str
+    error: str
+    retry_count: int
+    max_retries: int
+    sql_feedback: str
+    python_error_feedback: str
+    python_validation_feedback: str # 추가
+
+
+def search_relative_tables_node(state: AgentState):
+    print("---노드: 관련 테이블 검색---")
+    prompt = PromptTemplate(
+        template=PROMPT_SEARCH_RELATIVE_TABLES,
+        input_variables=["user_query", "rag_schema_context"],
+    )
+    chain = prompt | llm | JsonOutputParser()
+    result = chain.invoke({
         "user_query": state["user_query"],
-        "entities": state["entities"],
-        "rag_schema_context": state["rag_schema_context"],
-    }
+        "rag_schema_context": state["rag_schema_context"]
+    })
+    save_result(result, "relative_tables.json", True)
+    return {"relative_tables": result}
 
-def search_relative_tables(user_query: str, rag_schema_context: str):
+
+def generate_sql_queries_node(state: AgentState):
+    print("---노드: SQL 쿼리 생성---")
+    prompt = PromptTemplate(
+        template=PROMPT_GENERATE_SQL_QUERY,
+        input_variables=["user_query", "relative_tables", "business_rules"],
+    )
+    chain = prompt | llm | JsonOutputParser()
+    feedback = state.get("sql_feedback", "")
+    if feedback:
+        feedback = f"이전에 생성한 결과와 피드백:\n{state.get('sql_queries')}\n{feedback}"
+    result = chain.invoke({
+        "user_query": state["user_query"],
+        "relative_tables": state["relative_tables"],
+        "business_rules": BUSINESS_RULES_FOR_SQL_GENERATION,
+        "sql_feedback": feedback,
+    })
+    save_result(result, "sql_query.json", True)
+    return {"sql_queries": result, "sql_feedback": ""}  # 피드백 사용 후 초기화
+
+
+def validate_sql_query_node(state: AgentState):
+    print("---노드: SQL 쿼리 검증---")
+    prompt = PromptTemplate(
+        template=PROMPT_VALIDATE_SQL_QUERY,
+        input_variables=["user_query", "sql_queries", "relative_tables", "business_rules"],
+    )
+    chain = prompt | llm | JsonOutputParser()
+    result = chain.invoke({
+        "user_query": state["user_query"],
+        "relative_tables": state["relative_tables"],
+        "business_rules": BUSINESS_RULES_FOR_SQL_GENERATION,
+        "sql_queries": state["sql_queries"],
+    })
+    save_result(result, "sql_validation.json", False)   # 검증 실패 시 아래에서 피드백 print()
+    return {"sql_validation": result}
+
+
+def decide_sql_revalidation(state: AgentState):
+    print("---엣지: SQL 재검증 결정---")
+    if state["sql_validation"]["is_valid"]:
+        return "generate_python_code"
+    else:
+        return "handle_sql_feedback"
+
+
+def handle_sql_feedback_node(state: AgentState):
+    print("---노드: SQL 피드백 처리---")
+    retry_count = state.get("retry_count", 0) + 1
+    feedback = state["sql_validation"]["feedback"]
+    print(f"SQL 검증 실패 피드백: {feedback}, 재시도 횟수: {retry_count}")
+    return {"retry_count": retry_count, "sql_feedback": feedback}
+
+
+def generate_python_code_node(state: AgentState):
+    print("---노드: Python 코드 생성---")
+    prompt = PromptTemplate(
+        template=PROMPT_GENERATE_PYTHON_CODE,
+        input_variables=["user_query", "relative_tables", "sql_queries", "business_rules"],
+    )
+    chain = prompt | llm | StrOutputParser()
+    feedback = state.get("python_error_feedback", "") or state.get("python_validation_feedback", "")
+    if feedback:
+        feedback = f"이전에 생성한 결과와 피드백:\n{state.get('python_code')}\n{feedback}"
+    result = chain.invoke({
+        "user_query": state["user_query"],
+        "relative_tables": state["relative_tables"],
+        "business_rules": BUSINESS_RULES_FOR_PYTHON_GENERATION,
+        "sql_queries": state["sql_queries"],
+        "python_feedback": feedback,
+    })
+    clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", result).strip()
+    save_result(clean_code, "python_code.py", True)
+    return {"python_code": clean_code, "python_error_feedback": "", "python_validation_feedback": ""} # 피드백 사용 후 초기화
+
+
+def execute_python_code_node(state: AgentState):
+    print("---노드: Python 코드 실행---")
     try:
-        content = PROMPT_SEARCH_RELATIVE_TABLES.format(user_query=user_query, rag_schema_context=rag_schema_context)
-        response = chat.send_message(content)
-        clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-        result = json.loads(clean_response)
+        execution_output = run_dynamic_code(state["python_code"])
+        error = execution_output["error"]
+        if error:
+            raise
+        result = execution_output["captured_output"]
+        save_result(result, "python_result.txt", True)
+        return {"python_execution_result": result}
     except Exception:
-        result = None
-    return result
+        error_message = f"Python 코드 실행에 실패하였습니다. 에러 발생 라인: {error.__traceback__.tb_lineno}, 에러 타입: {type(error).__name__}, 에러 메시지: {str(error)}"
+        save_result(error_message, "python_error.txt", True)
+        return {"error": error_message}
 
-def generate_sql_queries(business_rules: str):
-    try:
-        content = PROMPT_GENERATE_SQL_QUERY.format(business_rules=business_rules)
-        response = chat.send_message(content)
-        clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-        result = json.loads(clean_response)
-    except Exception:
-        result = None
-    return result
 
-def validate_sql_query():
-    result = {"is_valid": True, "feedback": ""}
-    try:
-        content = PROMPT_VALIDATE_SQL_QUERY
-        response = chat.send_message(content)
-        clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-        result = json.loads(clean_response)
-    except Exception:
-        result = {"is_valid": False, "feedback": "답변 생성에 실패하였습니다. 다시 시도해주세요."}
-    return result
+def validate_python_execution_node(state: AgentState):
+    print("---노드: Python 코드 실행 결과 검증---")
+    prompt = PromptTemplate(
+        template=PROMPT_VALIDATE_PYTHON_EXECUTION,
+        input_variables=["user_query", "python_execution_result", "business_rules"],
+    )
+    chain = prompt | llm | JsonOutputParser()
+    result = chain.invoke({
+        "user_query": state["user_query"],
+        "business_rules": BUSINESS_RULES_FOR_PYTHON_GENERATION,
+        "python_code": state["python_code"],
+        "python_execution_result": state["python_execution_result"],
+    })
+    save_result(result, "python_validation.json", True)
+    return {"python_validation": result}
 
-def response_feedback(feedback: str, stage: str):
-    result = {"is_valid": True, "feedback": ""}
-    try:
-        content = f"{feedback}\n\n이 내용을 참고하여 이전 {stage} 작업을 다시 진행해주세요."
-        response = chat.send_message(content)
-        try:    # NOTE 이 부분 마지막으로 수정
-            clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-            save_result(json.loads(clean_response), f"feedback_regeneration.json", True)
-        except Exception:
-            pass
-        content = f"이에 대한 검증 작업을 다시 진행해주세요. 출력 형식에 주의합니다."
-        response = chat.send_message(content)
-        clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-        result = json.loads(clean_response)
-        try:
-            save_result(result, f"feedback_validation.json", True)
-        except Exception:
-            pass
-    except Exception:
-        result = {"is_valid": False, "feedback": "답변 생성에 실패하였습니다. 다시 시도해주세요."}
-    return result
 
-def generate_python_code(business_rules) -> str:
-    try:
-        content = PROMPT_GENERATE_PYTHON_CODE.format(business_rules=business_rules)
-        response = chat.send_message(content)
-        clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-        result = clean_response
-    except Exception:
-        result = ""
-    return result
+def decide_python_reexecution(state: AgentState):
+    print("---엣지: Python 재실행 결정---")
+    if state.get("error"):
+        return "handle_python_error"
+    else:
+        return "validate_python_execution" # Python 코드 실행 성공 시 검증 노드로 이동
 
-def generate_final_result(python_execution_result: str) -> str:
-    try:
-        content = PROMPT_GENERATE_FINAL_RESULT.format(python_execution_result=python_execution_result)
-        response = chat.send_message(content)
-        clean_response = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-        result = clean_response
-    except Exception:
-        result = ""
-    return result
 
-def process(state: dict) -> dict:
-    info = _get_info(state)
+def handle_python_error_node(state: AgentState):
+    print("---노드: Python 오류 처리---")
+    retry_count = state.get("retry_count", 0) + 1
+    error_message = state["error"]
+    print(f"Python 코드 실행 실패 피드백: {error_message}, 재시도 횟수: {retry_count}")
+    return {"retry_count": retry_count, "python_error_feedback": error_message, "error": ""} # 오류 메시지 사용 후 초기화
 
-    max_retry = 3
 
-    # --- 관련 있는 테이블 파악 ---
+def decide_python_validation(state: AgentState):
+    print("---엣지: Python 검증 결과 결정---")
+    if state["python_validation"]["is_valid"]:
+        return "generate_final_result"
+    else:
+        return "handle_python_validation_feedback"
 
-    num_retry = 0
-    relative_tables = None
-    while relative_tables is None:
-        assert num_retry < max_retry
-        relative_tables = search_relative_tables(info["user_query"], info["rag_schema_context"])
-        num_retry += 1
-    save_result(relative_tables, "relative_tables.json", True)
 
-    # --- SQL 쿼리문 작성 ---
+def handle_python_validation_feedback_node(state: AgentState):
+    print("---노드: Python 검증 피드백 처리---")
+    retry_count = state.get("retry_count", 0) + 1
+    feedback = state["python_validation"]["feedback"]
+    print(f"Python 검증 실패 피드백: {feedback}, 재시도 횟수: {retry_count}")
+    return {"retry_count": retry_count, "python_validation_feedback": feedback}
 
-    num_retry = 0
-    sql_query = None
-    while sql_query is None:
-        assert num_retry < max_retry
-        sql_query = generate_sql_queries(BUSINESS_RULES_FOR_SQL_GENERATION)
-        num_retry += 1
-    save_result(sql_query, f"sql_query.json", True)
 
-    num_retry = 0
-    sql_validation = None
-    while sql_validation is None:
-        assert num_retry < max_retry
-        sql_validation = validate_sql_query()
-        num_retry += 1
-    save_result(sql_validation, f"sql_validation.json", True)
+# TODO
+def generate_final_result_node(state: AgentState):
+    print("---노드: 최종 결과 생성---")
+    prompt = PromptTemplate(
+        template=PROMPT_GENERATE_FINAL_RESULT,
+        input_variables=["python_execution_result", "error_message"],
+    )
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({
+        "python_execution_result": state["python_execution_result"],
+        "error_message": state.get("error", "")
+    })
+    save_result(result, "final_result.txt", True)
+    return {"final_result": result}
 
-    if not sql_validation["is_valid"]:
-        feedback = sql_validation["feedback"]
-        for _ in range(3):
-            retry = response_feedback(feedback, "SQL 쿼리문 작성")
-            if retry["is_valid"]:
-                break
-            feedback = retry["feedback"]
 
-    # --- 파이썬 코드 작성 ---
+# === LangGraph 워크플로우 정의 ===
 
-    num_retry = 0
-    num_appendix = 1
-    
-    python_code = ""
-    while python_code == "":
-        assert num_retry < max_retry
-        python_code = generate_python_code(BUSINESS_RULES_FOR_PYTHON_GENERATION)
-        num_retry += 1
-    save_result(python_code, f"python_code.py", True)
+# 그래프 초기화
+workflow = StateGraph(AgentState)
 
-    while True:
+# --- 노드 정의 ---
+workflow.add_node("search_relative_tables", search_relative_tables_node)
+workflow.add_node("generate_sql_queries", generate_sql_queries_node)
+workflow.add_node("validate_sql_query", validate_sql_query_node)
+workflow.add_node("handle_sql_feedback", handle_sql_feedback_node)
+workflow.add_node("generate_python_code", generate_python_code_node)
+workflow.add_node("execute_python_code", execute_python_code_node)
+workflow.add_node("validate_python_execution", validate_python_execution_node) # 추가
+workflow.add_node("handle_python_error", handle_python_error_node)
+workflow.add_node("handle_python_validation_feedback", handle_python_validation_feedback_node) # 추가
+workflow.add_node("generate_final_result", generate_final_result_node)
 
-        python_execution_result = None
-        for _ in range(3):
-            try:
-                execution_output = run_dynamic_code(python_code)
-                python_execution_result = execution_output["captured_output"]
-                break
-            except Exception as e:
-                error_message = f"Python code execution failed: {e}"
-                print(error_message)
-                feedback = error_message
-                content = f"{feedback}\n\n이 내용을 참고하여 파이썬 코드 작성 작업을 다시 진행해주세요. 출력 형식에 주의합니다."
-                response = chat.send_message(content)
-                python_code = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-                save_result(python_code, f"regenerated_python_code.py", True)
-        
-        STATE["python_execution_result"] = python_execution_result
-        
-        # --- 최종 응답 생성 ---
+# --- 엣지 조건부 함수 정의 ---
+def decide_sql_retry(state: AgentState):
+    print("---엣지: SQL 재시도 결정---")
+    if state["retry_count"] > state["max_retries"]:
+        return "end_with_error"
+    else:
+        return "generate_sql_queries"
 
-        num_retry = 0
-        final_result = ""
-        while final_result == "":
-            assert num_retry < max_retry
-            final_result = generate_final_result(STATE["python_execution_result"])
-            num_retry += 1
-        save_result(final_result, f"final_result.txt", True)
+def decide_python_retry(state: AgentState):
+    print("---엣지: Python 재시도 결정---")
+    if state["retry_count"] > state["max_retries"]:
+        return "end_with_error"
+    else:
+        return "generate_python_code"
 
-        # --- 추가 질문에 대해 파이썬 코드 생성 ---
+def decide_python_validation_retry(state: AgentState):
+    print("---엣지: Python 검증 재시도 결정---")
+    if state["retry_count"] > state["max_retries"]:
+        return "end_with_error"
+    else:
+        return "generate_python_code" # 검증 실패 시 Python 코드 재생성으로 이동
 
-        user_input = input()
-        if user_input == 'exit': break
+# --- 엣지 추가 ---
+workflow.set_entry_point("search_relative_tables")
+workflow.add_edge("search_relative_tables", "generate_sql_queries")
+workflow.add_edge("generate_sql_queries", "validate_sql_query")
 
-        num_retry = 0
-        python_code = ""
-        while python_code == "":
-            assert num_retry < max_retry
-            try:
-                content = f"""
-`추가질문`이 있습니다. 다음 내용을 바탕으로 `1. SQL 쿼리문 작성`, `2. 파이썬 코드 작성` 작업을 진행하고 완성된 형태의 실행가능한 파이썬 코드를 작성합니다.
+# SQL 검증 결과에 따른 조건부 엣지
+workflow.add_conditional_edges(
+    "validate_sql_query",
+    decide_sql_revalidation,
+    {
+        "generate_python_code": "generate_python_code",
+        "handle_sql_feedback": "handle_sql_feedback",
+    },
+)
 
-추가질문:
-{user_input}
+# SQL 피드백 처리 후 재시도 여부 결정 엣지
+workflow.add_conditional_edges(
+    "handle_sql_feedback",
+    decide_sql_retry,
+    {
+        "generate_sql_queries": "generate_sql_queries", # 재시도
+        "end_with_error": "end_with_error",             # 재시도 횟수 초과 시
+    },
+)
 
-규칙: 
-- 별도의 설명이나 주석, 텍스트를 붙이지 않고 파이썬 코드만 작성합니다.
-"""
-                response = chat.send_message(content)
-                python_code = re.sub(r"```(?:json|sql|python)?\s*([\s\S]*?)\s*```", r"\1", response.text).strip()
-            except Exception as e:
-                print(f"문제가 발생: {e}")
-            num_retry += 1
+workflow.add_edge("generate_python_code", "execute_python_code")
 
-        if python_code == "":
-            break
+# Python 코드 실행 결과에 따른 조건부 엣지 (수정)
+workflow.add_conditional_edges(
+    "execute_python_code",
+    decide_python_reexecution,
+    {
+        "validate_python_execution": "validate_python_execution", # 실행 성공 시 검증 노드로
+        "handle_python_error": "handle_python_error",
+    },
+)
 
-        save_result(python_code, f"python_code_{num_appendix}.py", True)
-        num_appendix += 1
+# Python 오류 처리 후 재시도 여부 결정 엣지
+workflow.add_conditional_edges(
+    "handle_python_error",
+    decide_python_retry,
+    {
+        "generate_python_code": "generate_python_code", # 재시도
+        "end_with_error": "end_with_error",             # 재시도 횟수 초과 시
+    },
+)
 
-    return final_result
+# Python 검증 결과에 따른 조건부 엣지 (추가)
+workflow.add_conditional_edges(
+    "validate_python_execution",
+    decide_python_validation,
+    {
+        "generate_final_result": "generate_final_result",
+        "handle_python_validation_feedback": "handle_python_validation_feedback",
+    },
+)
 
+# Python 검증 피드백 처리 후 재시도 여부 결정 엣지 (추가)
+workflow.add_conditional_edges(
+    "handle_python_validation_feedback",
+    decide_python_validation_retry,
+    {
+        "generate_python_code": "generate_python_code", # 재시도
+        "end_with_error": "end_with_error",             # 재시도 횟수 초과 시
+    },
+)
+
+# 최종 결과 생성 및 오류 종료 엣지
+workflow.add_edge("generate_final_result", END)
+workflow.add_node("end_with_error", generate_final_result_node) # 최종 오류 처리 노드
+workflow.add_edge("end_with_error", END)
+
+# 그래프 컴파일
+app = workflow.compile()
 
 
 if __name__ == "__main__":
-    STATE['user_query'] = input("무엇을 도와드릴까요? ")
-    process(STATE)
+    user_query = input("무엇을 도와드릴까요? ")
+    initial_state = {
+        "user_query": user_query,
+        "rag_schema_context": STATE["rag_schema_context"],
+        "retry_count": 0,
+        "max_retries": 3,
+        "sql_feedback": "",
+        "python_error_feedback": ""
+    }
+    final_state = app.invoke(initial_state)
+    print("\n--- 최종 결과 ---")
+    print(final_state.get("final_result", "오류로 인해 최종 결과를 생성하지 못했습니다."))

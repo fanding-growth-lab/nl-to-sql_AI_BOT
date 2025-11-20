@@ -1,0 +1,20 @@
+Python 코드 실행에 실패하였습니다. 에러 발생 라인: 69, 에러 타입: OperationalError, 에러 메시지: (pymysql.err.OperationalError) (1054, "Unknown column 'tp.post_del_datetime' in 'WHERE'")
+[SQL: 
+SELECT
+    tp.`no` AS `post_no`,
+    tp.`title` AS `post_title`,
+    tp.`ins_datetime` AS `post_upload_datetime`,
+    tpl.`member_no` AS `viewer_member_no`,
+    tpl.`ins_datetime` AS `view_datetime`
+FROM `t_post` AS tp
+JOIN `t_post_view_log` AS tpl
+    ON tp.`no` = tpl.`post_no`
+WHERE
+    tp.`member_no` = %(author_member_no)s
+    AND tp.`post_del_datetime` IS NULL
+    AND tpl.`ins_datetime` >= '2025-10-01 00:00:00'
+    AND tpl.`ins_datetime` <= '2025-10-31 23:59:59'
+    AND tpl.`member_no` != %(author_member_no)s;
+]
+[parameters: {'author_member_no': np.int64(1053657)}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
