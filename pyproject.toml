@@ -61,6 +61,7 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.24.0",
     "matplotlib>=3.9.4",
+    "langchain-community>=0.3.20",
 ]
 
 [project.optional-dependencies]

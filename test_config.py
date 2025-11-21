@@ -33,7 +33,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # LangChain 모델 초기화
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-3-pro-preview", google_api_key=GOOGLE_API_KEY)
 
 
 # === GLOBAL FUNCTIONS ===
@@ -56,6 +56,14 @@ import sys
 from io import StringIO
 
 def run_dynamic_code(code: str, context: dict = None):
+    # Create proper globals context for exec to allow imports
+    if context is None:
+        context = {'__builtins__': __builtins__}
+    else:
+        # Ensure __builtins__ is always available
+        if '__builtins__' not in context:
+            context['__builtins__'] = __builtins__
+    
     local_env = {}
     
     # Redirect stdout to capture print statements
@@ -66,7 +74,7 @@ def run_dynamic_code(code: str, context: dict = None):
     error = None
     captured_output = None
     try:
-        exec(code, context or {}, local_env)
+        exec(code, context, local_env)
         captured_output = redirected_output.getvalue()
     except Exception as e:
         error = e
@@ -77,128 +85,8 @@ def run_dynamic_code(code: str, context: dict = None):
 
 
 # === GLOBAL VARIABLES ===
-BUSINESS_RULES_FOR_SQL_GENERATION = """
-* Data Relationship Summary
-- Creator's name can be found in `t_member.nickname`.
-- `t_member.no` joins with `t_creator.member_no`.
-- `t_creator.no` joins with `t_payment.seller_creator_no`.
-- `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.
-- `t_post.member_no` represents the Creator (Uploader).
-- `t_post_view_log.member_no` represents the Viewer.
+# Business rules are now handled by rule_rag.py
 
-* Aggregation Timeframes:
-- Daily: 00:00:00 to 23:59:59. Snapshot at 23:59:59.
-- Weekly: Monday 00:00:00 to Sunday 23:59:59. Snapshot at Sunday 23:59:59.
-- Monthly: First day of the month 00:00:00 to last day of the month 23:59:59. Snapshot at last day 23:59:59.
-
-* Data Query Scope (CRITICAL for Continuity)
-- Historical Data Requirement: To correctly identify whether a block starting on the 1st of the target month is a "New" subscription or a "Renewal", you MUST query data starting at least 1 month prior to the target analysis start date.
-
-* Payment Data Rules
-- Completed Payment: `status` is NOT 'W' (Waiting) or 'F' (Failed), and `pay_datetime` is not NULL.
-- Refund: `status` is 'R' (Full Refund) or 'P' (Partial Refund).
-  - 'R' (Full Refund): The member is considered to have no experience, and the payment is excluded from the installment count.
-  - 'P' (Partial Refund): The member has some experience, and the payment is included in the installment count.
-- Actual sales amount must be calculated using `remain_price`. The `price` column should NOT be used.
-- When analyzing sales, you must include statuses 'T' (Approved) and 'P' (Partially Refunded).
-- Currency Conversion:
-  - For KRW (currency_no = 1): use `remain_price`.
-  - For USD (currency_no = 2): use `remain_price` * 1360.
-  - For HEAT (currency_no is NULL): use `remain_heat` * 110.
-
-* Post & Activity Analysis Rules (CRITICAL for Accuracy)
-- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.
-  - **Logic**: `t_post.del_datetime` IS NULL.
-- **Audience Validity (No Self-Views)**: When calculating "Visitors", "Views", or "Visit Rate", you MUST exclude the Creator's own activity.
-  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).
-- **Visit Rate Calculation**:
-  - Numerator: Unique Viewers (excluding Creator).
-  - Denominator: Total Active Members (at snapshot).
-
-* Activity & Engagement Metric Definitions (CRITICAL for Matching Reference Standards)
-- **Average Daily Visitors (Monthly)**:
-  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.  
-- **Visit Rate (%)**:
-  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.
-- **Top Posts (Monthly)**:
-  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count.
-"""
-
-BUSINESS_RULES_FOR_PYTHON_GENERATION = """
-* Data Relationship Summary
-- Creator's name can be found in `t_member.nickname`.
-- `t_member.no` joins with `t_creator.member_no`.
-- `t_creator.no` joins with `t_payment.seller_creator_no`.
-- `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.
-- `t_post.member_no` represents the Creator (Uploader).
-- `t_post_view_log.member_no` represents the Viewer.
-
-* Aggregation Timeframes:
-- Daily: 00:00:00 to 23:59:59. Snapshot at 23:59:59.
-- Weekly: Monday 00:00:00 to Sunday 23:59:59. Snapshot at Sunday 23:59:59.
-- Monthly: First day of the month 00:00:00 to last day of the month 23:59:59. Snapshot at last day 23:59:59.
-
-* Data Query Scope (CRITICAL for Continuity)
-- Historical Data Requirement: To correctly identify whether a block starting on the 1st of the target month is a "New" subscription or a "Renewal", you MUST query data starting at least 1 month prior to the target analysis start date.
-- Filtering: Load the extended dataset first to construct Blocks, then filter for the target analysis period during the aggregation step.
-
-* Payment Data Rules
-- Completed Payment: `status` is NOT 'W' (Waiting) or 'F' (Failed), and `pay_datetime` is not NULL.
-- Refund: `status` is 'R' (Full Refund) or 'P' (Partial Refund).
-  - 'R' (Full Refund): The member is considered to have no experience, and the payment is excluded from the installment count.
-  - 'P' (Partial Refund): The member has some experience, and the payment is included in the installment count.
-- Actual sales amount must be calculated using `remain_price`. The `price` column should NOT be used.
-- When analyzing sales, you must include statuses 'T' (Approved) and 'P' (Partially Refunded).
-- Currency Conversion:
-  - For KRW (currency_no = 1): use `remain_price`.
-  - For USD (currency_no = 2): use `remain_price` * 1360.
-  - For HEAT (currency_no is NULL): use `remain_heat` * 110.
-
-* Post & Activity Analysis Rules (CRITICAL for Accuracy)
-- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.
-  - **Logic**: `t_post.post_del_datetime` IS NULL.
-- **Audience Validity (No Self-Views)**: When calculating "Visitors", "Views", or "Visit Rate", you MUST exclude the Creator's own activity.
-  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).
-- **Visit Rate Calculation**:
-  - Numerator: Unique Viewers (excluding Creator).
-  - Denominator: Total Active Members (at snapshot).
-
-* Membership Block Logic (Crucial for Retention & New Member Analysis)
-- **Concept**: Analysis is performed on 'Blocks', not raw logs. A Block represents a continuous period of subscription.
-- **Block Creation Rules**:
-  1. Sort `t_fanding_log` by `member_no` and `start_date`.
-  2. A new Block starts if:
-     - It is the member's first record.
-     - OR `start_date` > (`prev_end_date` + 3 days). (A gap of 4 days or more).
-     - OR `coupon_member_no` is NOT NULL. (Using a coupon always starts a new Block, regardless of the date gap).
-  3. Consecutive logs with a gap of 3 days or less (and no coupon) are merged into a single Block (min start_date to max end_date).
-
-* Membership Metric Definitions
-- **New Member (Monthly)**: Total number of subscription Blocks that started (`real_start_date`) within the target month.
-  - **Definition**: This INCLUDES returning members who churned and then started a new Block within the same month.
-  - **Technical Rule**: Use `len()` (row count) of the filtered blocks DataFrame, **NOT** `nunique()` of `member_no`. Counting unique members will incorrectly undercount re-joining events.  
-- **Existing(Active) Member (Monthly)**: Total number of unique members active at the month-end snapshot.
-  - **Logic**: `real_start_date` <= Month_End_Date AND `real_end_date` > Month_End_Date.
-  - **Technical Rule**: Use `nunique()` of `member_no` (Headcount).
-- **Churner**: A member whose Block ends within the period and does not start a new Block within 3 days.
-- **Active Member Grace Period**: Only applicable when analyzing the 'Current' unfinished month. If the current date is within 3 days of a Block's end date, the member is still considered active. For historical months, use the strict Block dates.
-
-* Activity & Engagement Metric Definitions (CRITICAL for Matching Reference Standards)
-- **Average Daily Visitors (Monthly)**:
-  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.
-  - **Logic**: First, group by `view_date` to count unique `viewer_member_no` (DAU). Then, calculate the `.mean()` of these daily counts.
-  - **Restriction**: Do NOT calculate the average visitors per post.
-  
-- **Visit Rate (%)**:
-  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.
-  - **Numerator**: The count of unique members who appear in BOTH the `Active Existing Members (Month-End)` list AND the `Post View Log` for that month (Intersection).
-  - **Denominator**: The count of `Active Existing Members (Month-End)`.
-  - **Logic**: `(Intersection_Count / Active_Members_Count) * 100`. Do not use total monthly visitors as the numerator (it includes non-members/churners).
-
-- **Top Posts (Monthly)**:
-  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count.
-  - **Logic**: Join `t_post` and `t_post_view_log`. Filter where `post.ins_datetime` and `post_view_log.ins_datetime` are within the target month. Then rank by `viewer_member_no.nunique()`.
-"""
 
 PROMPT_SEARCH_RELATIVE_TABLES = """
 주어진 사용자 질문에 답하기 위해 반드시 필요한 데이터 테이블 목록과 이유를 반환합니다.
@@ -242,10 +130,22 @@ PROMPT_GENERATE_SQL_QUERY = f"""
 - 날짜 조건이 주어지면 앞에 1개월 여유를 두고 조회한다. (예: 8월 신규 가입 여부를 알기 위해선 7월 데이터도 필요) 
 - `비즈니스 규칙`을 따른다.
 
+[매우 중요 - Raw Data 추출 원칙]
+1. **절대 SQL에서 집계하지 마세요.**
+   - 사용자가 "평균", "합계", "수(Count)"를 물어보더라도, SQL에서는 `AVG`, `SUM`, `COUNT`, `GROUP BY`를 사용하지 마세요.
+   - 대신, 파이썬이 계산할 수 있도록 **필요한 모든 로우 데이터(Raw Data)**를 `SELECT` 하세요.
+   - 예: "월 평균 방문자 수" -> `SELECT ins_datetime, member_no FROM t_post_view_log ...` (O)
+   - 예: "월 평균 방문자 수" -> `SELECT AVG(COUNT(*)) ...` (X)
+
+2. **쿼리를 통합하세요 (효율성).**
+   - 동일한 테이블(`t_post_view_log` 등)이 여러 지표 계산에 필요하다면, **단 하나의 쿼리**로 통합하여 조회하세요.
+   - `WHERE` 절을 포괄적으로 설정하여 한 번에 가져오세요.
+   - 예: "10월 방문자 수"와 "10월 상위 포스트"를 물어보면 -> `t_post_view_log`를 10월 전체로 한 번만 조회하세요.
+
 [필수 체크리스트] - 아래 항목을 위반하면 절대 안됩니다.
 1. 쿼리에 GROUP BY, SUM, COUNT, AVG, MIN, MAX 등의 집계/통계 함수가 포함되어 있지 않은가? (반드시 예, 로우 데이터만 추출해야 함)
 2. 신규 회원/이탈 회원 등을 SQL에서 판단하려고 하지 않았는가? (반드시 예, SQL은 판단 로직 없이 모든 로그를 가져와야 함)
-3. 모든 컬럼을 무작정 조회(SELECT *)하지 않고, 분석에 필요한 컬럼만 명시적으로 선택했는가? (반드시 예)
+3. 동일한 테이블을 여러 번 조회하는 비효율적인 쿼리를 작성하지 않았는가? (반드시 예, 가능한 한 통합해야 함)
 
 출력 형식:
 ```json
@@ -273,13 +173,19 @@ PROMPT_VALIDATE_SQL_QUERY = """
 1. (비즈니스 규칙 검증) 비즈니스 규칙을 잘 따르고 있는가? (반드시 예)
 2. (정합성 검증) 관련 테이블 목록에 명시된 테이블이나 컬럼만 사용했는가? (반드시 예)
 3. (정합성 검증) MariaDB에서 정상 동작하는 문법으로 작성했는가? (반드시 예)
-4. (정합성 검증) 날짜 조건이 주어졌다면 앞에 1개월 여유를 두고 조회했는가? (반드시 예, 8월 신규 가입 여부를 알기 위해선 7월 데이터도 필요)
+4. (날짜 조건 검증) 쿼리 목적에 맞는 올바른 날짜 범위를 사용했는가? (반드시 예)
+   - **Block Logic 적용 쿼리** (신규/갱신/이탈 판단용): 1개월 여유를 두고 조회 (예: 8월 분석 시 7월부터)
+   - **스냅샷 쿼리** (특정 시점 활성 회원 수): 해당 시점 기준 조건 (예: 월말 23:59:59 기준 활성 상태)
+   - **일반 조회 쿼리** (포스트 조회 로그 등): 분석 대상 기간만 조회
 5. (로우 데이터 추출 여부 검증) GROUP BY, SUM, COUNT, AVG 등 집계 및 통계 함수를 사용하지 않고 로우 데이터만 추출하였는가? (반드시 예)
-6. (최적화 검증) 여러 쿼리로 나누지 않고 가능한 하나의 쿼리로 작성하였는가? (가능하다면 예, t_post_view_log와 같이 무거운 테이블을 여러 쿼리에서 조회하면 효율이 크게 떨어짐)
+   - **중요**: 사용자가 "평균", "합계"를 물어봤더라도 SQL에는 집계 함수가 없어야 합니다.
+6. (최적화 검증) 여러 쿼리로 나누지 않고 가능한 하나의 쿼리로 작성하였는가? (반드시 예)
+   - 특히 `t_post_view_log`와 같이 무거운 테이블을 여러 번 조회하는 것은 **매우 비효율적**이므로, 한 번의 조회로 필요한 데이터를 모두 가져와야 합니다.
+   - 예: "방문자 수"와 "상위 포스트"를 위해 `t_post_view_log`를 각각 조회했다면 **False**입니다.
 
 출력 형식:
 ```json
-{{"is_valid": <True 또는 False>, "feedback": <True인 경우 빈 문자열, False인 경우 검증 결과를 바탕으로 쿼리문을 개선하기 위해 필요한 내용>}}
+{{"is_valid": <true 또는 false>, "feedback": <true인 경우 빈 문자열, false인 경우 검증 결과를 바탕으로 쿼리문을 개선하기 위해 필요한 내용>}}
 ```
 """
 
@@ -310,7 +216,7 @@ SQL 쿼리문:
   - 아래 파이썬 코드를 사용해 데이터베이스에 연결하고 SQL문을 실행한다.
 
 ```python
-import pandas
+import pandas as pd
 from sqlalchemy import create_engine, text
 
 engine = create_engine(
@@ -329,6 +235,15 @@ df = pd.read_sql(text(query), engine)
   - groupby는 한 번에 필요한 집계를 수행하여 중복 groupby 호출을 최소화한다.
   - row 단위 apply(axis=1)는 절대 사용하지 않는다.
     - 대신 pandas의 벡터 연산 또는 np.where / Series.map 등을 사용해 계산한다.
+
+- (Membership Block Logic 구현 - 필수) 멤버십 분석 시 반드시 Block Logic을 구현해야 한다.
+  - RAG를 통해 제공된 [Code Example]을 참고하여 구현한다.
+
+- (활성 회원 계산 - Block 기반) 월말 기준 활성 회원은 반드시 Block 기반으로 계산한다:
+  - RAG를 통해 제공된 [Code Example]을 참고하여 구현한다.
+
+- (일별 평균 방문자 계산) 포스트 조회 로그에서 일별 unique 방문자의 평균을 계산한다:
+  - RAG를 통해 제공된 [Code Example]을 참고하여 구현한다.
 
 - (시각화) 시각적 비교나 트렌드가 필요한 경우 matplotlib 또는 seaborn을 활용한다.
   - 시각화는 최소한의 데이터만 사용하여 불필요한 연산을 방지한다.
@@ -373,7 +288,7 @@ PROMPT_VALIDATE_PYTHON_EXECUTION = """
 
 출력 형식:
 ```json
-{{"is_valid": <True 또는 False>, "feedback": <True인 경우 빈 문자열, False인 경우 검증 결과를 바탕으로 파이썬 코드를 개선하기 위해 필요한 내용>}}
+{{"is_valid": <true 또는 false>, "feedback": <true인 경우 빈 문자열, false인 경우 검증 결과를 바탕으로 파이썬 코드를 개선하기 위해 필요한 내용>}}
 ```
 """
 

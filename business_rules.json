@@ -1,0 +1,55 @@
+[
+    {
+        "category": "common",
+        "title": "Data Relationship Summary",
+        "content": "- Creator's name can be found in `t_member.nickname`.\n- `t_member.no` joins with `t_creator.member_no`.\n- `t_creator.no` joins with `t_payment.seller_creator_no`.\n- `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.\n- `t_post.member_no` represents the Creator (Uploader).\n- `t_post_view_log.member_no` represents the Viewer."
+    },
+    {
+        "category": "common",
+        "title": "Aggregation Timeframes",
+        "content": "- Daily: 00:00:00 to 23:59:59. Snapshot at 23:59:59.\n- Weekly: Monday 00:00:00 to Sunday 23:59:59. Snapshot at Sunday 23:59:59.\n- Monthly: First day of the month 00:00:00 to last day of the month 23:59:59. Snapshot at last day 23:59:59."
+    },
+    {
+        "category": "sql",
+        "title": "Data Query Scope (CRITICAL for Continuity)",
+        "content": "- Historical Data Requirement: To correctly identify whether a block starting on the 1st of the target month is a \"New\" subscription or a \"Renewal\", you MUST query data starting at least 1 month prior to the target analysis start date."
+    },
+    {
+        "category": "python",
+        "title": "Data Query Scope (CRITICAL for Continuity)",
+        "content": "- Historical Data Requirement: To correctly identify whether a block starting on the 1st of the target month is a \"New\" subscription or a \"Renewal\", you MUST query data starting at least 1 month prior to the target analysis start date.\n- Filtering: Load the extended dataset first to construct Blocks, then filter for the target analysis period during the aggregation step."
+    },
+    {
+        "category": "common",
+        "title": "Payment Data Rules",
+        "content": "- Completed Payment: `status` is NOT 'W' (Waiting) or 'F' (Failed), and `pay_datetime` is not NULL.\n- Refund: `status` is 'R' (Full Refund) or 'P' (Partial Refund).\n  - 'R' (Full Refund): The member is considered to have no experience, and the payment is excluded from the installment count.\n  - 'P' (Partial Refund): The member has some experience, and the payment is included in the installment count.\n- Actual sales amount must be calculated using `remain_price`. The `price` column should NOT be used.\n- When analyzing sales, you must include statuses 'T' (Approved) and 'P' (Partially Refunded).\n- Currency Conversion:\n  - For KRW (currency_no = 1): use `remain_price`.\n  - For USD (currency_no = 2): use `remain_price` * 1360.\n  - For HEAT (currency_no is NULL): use `remain_heat` * 110."
+    },
+    {
+        "category": "common",
+        "title": "Post & Activity Analysis Rules",
+        "content": "- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.\n  - **Logic**: `t_post.del_datetime` IS NULL.\n- **Audience Validity (No Self-Views)**: When calculating \"Visitors\", \"Views\", or \"Visit Rate\", you MUST exclude the Creator's own activity.\n  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).\n- **Visit Rate Calculation**:\n  - Numerator: Unique Viewers (excluding Creator).\n  - Denominator: Total Active Members (at snapshot)."
+    },
+    {
+        "category": "python",
+        "title": "Membership Block Logic",
+        "content": "- **Concept**: Analysis is performed on 'Blocks', not raw logs. A Block represents a continuous period of subscription.\n- **Block Creation Rules**:\n  1. Sort `t_fanding_log` by `member_no` and `start_date`.\n  2. A new Block starts if:\n     - It is the member's first record.\n     - OR `start_date` > (`prev_end_date` + 3 days). (A gap of 4 days or more).\n     - OR `coupon_member_no` is NOT NULL. (Using a coupon always starts a new Block, regardless of the date gap).\n  3. Consecutive logs with a gap of 3 days or less (and no coupon) are merged into a single Block (min start_date to max end_date).",
+        "code_example": "def convert_to_block(df_fanding_log, gap_days=3):\n    \"\"\"\n    멤버십 로그를 Block 단위로 변환.\n    Block = 연속된 구독 기간 (3일 이하 간격은 연속으로 간주)\n    \"\"\"\n    if df_fanding_log.empty:\n        return pd.DataFrame()\n    \n    # 날짜 변환\n    df = df_fanding_log.copy()\n    df[\"start_date\"] = pd.to_datetime(df[\"start_date\"])\n    df[\"end_date\"] = pd.to_datetime(df[\"end_date\"])\n    \n    # fanding_no별로 정렬\n    df = df.sort_values([\"fanding_no\", \"start_date\"])\n    \n    # 이전 end_date 계산\n    df[\"prev_end_date\"] = df.groupby(\"fanding_no\")[\"end_date\"].shift(1)\n    \n    # Block 분리 조건 (중요!)\n    df[\"is_new_block\"] = (\n        df[\"prev_end_date\"].isna()  # 첫 기록\n        | ((df[\"start_date\"] - df[\"prev_end_date\"]).dt.days > gap_days)  # 3일 초과 간격\n        | (df[\"coupon_member_no\"].notna())  # 쿠폰 사용 시 새 Block\n    )\n    \n    # Block ID 부여\n    df[\"block_id\"] = df.groupby(\"fanding_no\")[\"is_new_block\"].cumsum()\n    \n    # Block별 집계\n    df_block = (\n        df.groupby([\"fanding_no\", \"block_id\"])\n        .agg({\n            \"member_no\": \"first\",\n            \"start_date\": \"min\",  # Block 시작일 = 가장 이른 start_date\n            \"end_date\": \"max\",    # Block 종료일 = 가장 늦은 end_date\n        })\n        .reset_index()\n    )\n    \n    return df_block"
+    },
+    {
+        "category": "python",
+        "title": "Membership Metric Definitions",
+        "content": "- **New Member (Monthly)**: Total number of subscription Blocks that started (`real_start_date`) within the target month.\n  - **Definition**: This INCLUDES returning members who churned and then started a new Block within the same month.\n  - **Technical Rule**: Use `len()` (row count) of the filtered blocks DataFrame, **NOT** `nunique()` of `member_no`. Counting unique members will incorrectly undercount re-joining events.  \n- **Existing(Active) Member (Monthly)**: Total number of unique members active at the month-end snapshot.\n  - **Logic**: `real_start_date` <= Month_End_Date AND `real_end_date` > Month_End_Date.\n  - **Technical Rule**: Use `nunique()` of `member_no` (Headcount).\n- **Churner**: A member whose Block ends within the period and does not start a new Block within 3 days.\n- **Active Member Grace Period**: Only applicable when analyzing the 'Current' unfinished month. If the current date is within 3 days of a Block's end date, the member is still considered active. For historical months, use the strict Block dates.",
+        "code_example": "from datetime import timedelta, datetime\n\n# 월말 시점 계산\nlast_day_of_month = pd.Period(\"2025-10\").end_time  # 2025-10-31 23:59:59\ntoday = datetime.now()\n\n# 활성 Block 필터링\nactive_blocks = df_block[\n    (df_block[\"start_date\"] <= last_day_of_month) &\n    (df_block[\"end_date\"] > min(last_day_of_month, today - timedelta(days=3)))\n]\n\n# 활성 회원 수 = 활성 Block 수\nactive_member_count = len(active_blocks)\nactive_member_nos = set(active_blocks[\"member_no\"])"
+    },
+    {
+        "category": "common",
+        "title": "Activity & Engagement Metric Definitions",
+        "content": "- **Average Daily Visitors (Monthly)**:\n  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.\n- **Visit Rate (%)**:\n  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.\n- **Top Posts (Monthly)**:\n  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count."
+    },
+    {
+        "category": "python",
+        "title": "Activity & Engagement Metric Definitions (Python Specific)",
+        "content": "- **Average Daily Visitors (Monthly)**:\n  - **Logic**: First, group by `view_date` to count unique `viewer_member_no` (DAU). Then, calculate the `.mean()` of these daily counts.\n  - **Restriction**: Do NOT calculate the average visitors per post.\n- **Visit Rate (%)**:\n  - **Numerator**: The count of unique members who appear in BOTH the `Active Existing Members (Month-End)` list AND the `Post View Log` for that month (Intersection).\n  - **Denominator**: The count of `Active Existing Members (Month-End)`.\n  - **Logic**: `(Intersection_Count / Active_Members_Count) * 100`. Do not use total monthly visitors as the numerator (it includes non-members/churners).\n- **Top Posts (Monthly)**:\n  - **Logic**: Join `t_post` and `t_post_view_log`. Filter where `post.ins_datetime` and `post_view_log.ins_datetime` are within the target month. Then rank by `viewer_member_no.nunique()`.",
+        "code_example": "# 일별로 정규화\ndf_view_log[\"view_date\"] = pd.to_datetime(df_view_log[\"ins_datetime\"]).dt.normalize()\n\n# 일별 unique 방문자 수 계산\ndaily_unique_visitors = (\n    df_view_log\n    .groupby(\"view_date\")[\"member_no\"]\n    .nunique()\n    .reset_index(name=\"daily_uv\")\n)\n\n# 월 평균 = 일별 UV의 평균\nmonthly_avg_visitors = daily_unique_visitors[\"daily_uv\"].mean()"
+    }
+]

@@ -5,14 +5,11 @@ from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-
 from test_config import (
     llm,
     STATE,
     save_result,
     run_dynamic_code,
-    BUSINESS_RULES_FOR_SQL_GENERATION,
-    BUSINESS_RULES_FOR_PYTHON_GENERATION,
     PROMPT_SEARCH_RELATIVE_TABLES,
     PROMPT_GENERATE_SQL_QUERY,
     PROMPT_VALIDATE_SQL_QUERY,
@@ -20,6 +17,7 @@ from test_config import (
     PROMPT_GENERATE_FINAL_RESULT,
     PROMPT_VALIDATE_PYTHON_EXECUTION
 )
+from rule_rag import retrieve_relevant_rules
 
 
 class AgentState(TypedDict):
@@ -65,10 +63,14 @@ def generate_sql_queries_node(state: AgentState):
     feedback = state.get("sql_feedback", "")
     if feedback:
         feedback = f"이전에 생성한 결과와 피드백:\n{state.get('sql_queries')}\n{feedback}"
+    # Retrieve relevant business rules for SQL
+    business_rules = retrieve_relevant_rules(state["user_query"], category="sql")
+    print(business_rules)
+    
     result = chain.invoke({
         "user_query": state["user_query"],
         "relative_tables": state["relative_tables"],
-        "business_rules": BUSINESS_RULES_FOR_SQL_GENERATION,
+        "business_rules": business_rules,
         "sql_feedback": feedback,
     })
     save_result(result, "sql_query.json", True)
@@ -82,10 +84,14 @@ def validate_sql_query_node(state: AgentState):
         input_variables=["user_query", "sql_queries", "relative_tables", "business_rules"],
     )
     chain = prompt | llm | JsonOutputParser()
+    # Retrieve relevant business rules for SQL validation
+    business_rules = retrieve_relevant_rules(state["user_query"], category="sql")
+    print(business_rules)
+
     result = chain.invoke({
         "user_query": state["user_query"],
         "relative_tables": state["relative_tables"],
-        "business_rules": BUSINESS_RULES_FOR_SQL_GENERATION,
+        "business_rules": business_rules,
         "sql_queries": state["sql_queries"],
     })
     save_result(result, "sql_validation.json", False)   # 검증 실패 시 아래에서 피드백 print()
@@ -118,10 +124,14 @@ def generate_python_code_node(state: AgentState):
     feedback = state.get("python_error_feedback", "") or state.get("python_validation_feedback", "")
     if feedback:
         feedback = f"이전에 생성한 결과와 피드백:\n{state.get('python_code')}\n{feedback}"
+    # Retrieve relevant business rules for Python
+    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    print(business_rules)
+
     result = chain.invoke({
         "user_query": state["user_query"],
         "relative_tables": state["relative_tables"],
-        "business_rules": BUSINESS_RULES_FOR_PYTHON_GENERATION,
+        "business_rules": business_rules,
         "sql_queries": state["sql_queries"],
         "python_feedback": feedback,
     })
@@ -153,9 +163,13 @@ def validate_python_execution_node(state: AgentState):
         input_variables=["user_query", "python_execution_result", "business_rules"],
     )
     chain = prompt | llm | JsonOutputParser()
+    # Retrieve relevant business rules for Python validation
+    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    print(business_rules)
+
     result = chain.invoke({
         "user_query": state["user_query"],
-        "business_rules": BUSINESS_RULES_FOR_PYTHON_GENERATION,
+        "business_rules": business_rules,
         "python_code": state["python_code"],
         "python_execution_result": state["python_execution_result"],
     })
@@ -204,7 +218,7 @@ def generate_final_result_node(state: AgentState):
     )
     chain = prompt | llm | StrOutputParser()
     result = chain.invoke({
-        "python_execution_result": state["python_execution_result"],
+        "python_execution_result": state.get("python_execution_result", ""),
         "error_message": state.get("error", "")
     })
     save_result(result, "final_result.txt", True)
@@ -328,6 +342,12 @@ app = workflow.compile()
 
 if __name__ == "__main__":
     user_query = input("무엇을 도와드릴까요? ")
+    
+    # 디버그: 입력값 확인
+    print(f"\n[DEBUG] 받은 질문: {user_query}")
+    print(f"[DEBUG] 질문 길이: {len(user_query)}자")
+    print(f"[DEBUG] 질문 repr: {repr(user_query)}\n")
+    
     initial_state = {
         "user_query": user_query,
         "rag_schema_context": STATE["rag_schema_context"],
