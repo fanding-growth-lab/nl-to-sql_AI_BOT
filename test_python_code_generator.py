@@ -15,7 +15,10 @@ from test_config import (
     PROMPT_VALIDATE_SQL_QUERY,
     PROMPT_GENERATE_PYTHON_CODE,
     PROMPT_GENERATE_FINAL_RESULT,
-    PROMPT_VALIDATE_PYTHON_EXECUTION
+    PROMPT_PLAN_PYTHON_ANALYSIS,
+    PROMPT_GENERATE_PYTHON_STEP,
+    PROMPT_VALIDATE_PYTHON_STEP,
+    PROMPT_VALIDATE_PYTHON_EXECUTION,
 )
 from rule_rag import retrieve_relevant_rules
 
@@ -36,6 +39,13 @@ class AgentState(TypedDict):
     sql_feedback: str
     python_error_feedback: str
     python_validation_feedback: str # 추가
+    # Iterative Python Execution State
+    python_plan: List[str]
+    current_step_index: int
+    python_context: Dict[str, Any]
+    step_code: str
+    step_result: str
+    step_validation: Dict[str, Any]
 
 
 def search_relative_tables_node(state: AgentState):
@@ -65,7 +75,6 @@ def generate_sql_queries_node(state: AgentState):
         feedback = f"이전에 생성한 결과와 피드백:\n{state.get('sql_queries')}\n{feedback}"
     # Retrieve relevant business rules for SQL
     business_rules = retrieve_relevant_rules(state["user_query"], category="sql")
-    print(business_rules)
     
     result = chain.invoke({
         "user_query": state["user_query"],
@@ -86,7 +95,6 @@ def validate_sql_query_node(state: AgentState):
     chain = prompt | llm | JsonOutputParser()
     # Retrieve relevant business rules for SQL validation
     business_rules = retrieve_relevant_rules(state["user_query"], category="sql")
-    print(business_rules)
 
     result = chain.invoke({
         "user_query": state["user_query"],
@@ -126,7 +134,6 @@ def generate_python_code_node(state: AgentState):
         feedback = f"이전에 생성한 결과와 피드백:\n{state.get('python_code')}\n{feedback}"
     # Retrieve relevant business rules for Python
     business_rules = retrieve_relevant_rules(state["user_query"], category="python")
-    print(business_rules)
 
     result = chain.invoke({
         "user_query": state["user_query"],
@@ -165,7 +172,6 @@ def validate_python_execution_node(state: AgentState):
     chain = prompt | llm | JsonOutputParser()
     # Retrieve relevant business rules for Python validation
     business_rules = retrieve_relevant_rules(state["user_query"], category="python")
-    print(business_rules)
 
     result = chain.invoke({
         "user_query": state["user_query"],
@@ -209,6 +215,156 @@ def handle_python_validation_feedback_node(state: AgentState):
     return {"retry_count": retry_count, "python_validation_feedback": feedback}
 
 
+def plan_python_analysis_node(state: AgentState):
+    print("---노드: Python 분석 계획 수립---")
+    prompt = PromptTemplate(
+        template=PROMPT_PLAN_PYTHON_ANALYSIS,
+        input_variables=["user_query", "relative_tables", "business_rules", "sql_queries"],
+    )
+    chain = prompt | llm | JsonOutputParser()
+    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    
+    result = chain.invoke({
+        "user_query": state["user_query"],
+        "relative_tables": state["relative_tables"],
+        "business_rules": business_rules,
+        "sql_queries": state["sql_queries"]
+    })
+    
+    print(f"수립된 계획: {result}")
+    save_result(result, "python_plan.json", True)
+    
+    return {
+        "python_plan": result,
+        "current_step_index": 0,
+        "python_context": {"__builtins__": __builtins__}, # 초기 컨텍스트
+        "python_code": "" # 전체 코드 누적용
+    }
+
+
+def generate_python_step_code_node(state: AgentState):
+    """Generate code for the current step."""
+    current_index = state["current_step_index"]
+    plan = state["python_plan"]
+    current_step = plan[current_index]
+    
+    print(f"---노드: Python 단계 코드 생성 ({current_index + 1}/{len(plan)}) : {current_step}---")
+    
+    prompt = PromptTemplate(
+        template=PROMPT_GENERATE_PYTHON_STEP,
+        input_variables=["user_query", "business_rules", "python_plan", "current_step", "python_context", "step_feedback"],
+    )
+    chain = prompt | llm | StrOutputParser()
+    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    
+    # Context summary for prompt
+    context_summary = {k: type(v).__name__ for k, v in state["python_context"].items() if k != "__builtins__"}
+    
+    # Get feedback if retry
+    step_feedback = state.get("step_validation", {}).get("feedback", "")
+    if step_feedback:
+        step_feedback = f"이전 시도 피드백:\n{step_feedback}"
+    
+    code = chain.invoke({
+        "user_query": state["user_query"],
+        "business_rules": business_rules,
+        "python_plan": plan,
+        "current_step": current_step,
+        "python_context": context_summary,
+        "step_feedback": step_feedback
+    })
+    
+    clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", code).strip()
+    print(f"생성된 코드:\n{clean_code}")
+    
+    return {
+        "step_code": clean_code
+    }
+
+
+def execute_python_step_node(state: AgentState):
+    """Execute the generated code for the current step."""
+    current_index = state["current_step_index"]
+    plan = state["python_plan"]
+    current_step = plan[current_index]
+    
+    print(f"---노드: Python 단계 실행 ({current_index + 1}/{len(plan)}) : {current_step}---")
+    
+    # Execute the code
+    execution_output = run_dynamic_code(state["step_code"], context=state["python_context"])
+    
+    # Merge new locals into context
+    if execution_output["local_env"]:
+        state["python_context"].update(execution_output["local_env"])
+        
+    step_result = execution_output["captured_output"] or ""
+    error = execution_output["error"]
+    
+    if error:
+        step_result += f"\nError: {str(error)}"
+        print(f"실행 오류: {error}")
+    else:
+        print(f"실행 결과:\n{step_result}")
+
+    # Accumulate code
+    new_accumulated_code = state["python_code"] + "\n\n" + f"# Step: {current_step}\n" + state["step_code"]
+        
+    return {
+        "step_result": step_result,
+        "python_code": new_accumulated_code,
+        "python_context": state["python_context"]
+    }
+
+
+def validate_python_step_node(state: AgentState):
+    print("---노드: Python 단계 검증---")
+    current_index = state["current_step_index"]
+    plan = state["python_plan"]
+    current_step = plan[current_index]
+    
+    prompt = PromptTemplate(
+        template=PROMPT_VALIDATE_PYTHON_STEP,
+        input_variables=["user_query", "business_rules", "current_step", "step_code", "step_result"],
+    )
+    chain = prompt | llm | JsonOutputParser()
+    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    
+    result = chain.invoke({
+        "user_query": state["user_query"],
+        "business_rules": business_rules,
+        "current_step": current_step,
+        "step_code": state["step_code"],
+        "step_result": state["step_result"]
+    })
+    
+    print(f"검증 결과: {result}")
+    return {"step_validation": result}
+
+
+def check_step_result(state: AgentState):
+    print("---엣지: 단계 결과 확인---")
+    validation = state["step_validation"]
+    
+    if validation["is_valid"]:
+        next_index = state["current_step_index"] + 1
+        if next_index < len(state["python_plan"]):
+            print(f"다음 단계로 이동: {next_index + 1}/{len(state['python_plan'])}")
+            return "next_step"
+        else:
+            print("모든 단계 완료, 최종 결과 생성")
+            return "finalize"
+    else:
+        print(f"현재 단계 재시도: {state['current_step_index'] + 1}/{len(state['python_plan'])}")
+        return "retry_step"
+
+
+def increment_step_index_node(state: AgentState):
+    """Move to next step by incrementing the index."""
+    next_index = state["current_step_index"] + 1
+    print(f"Step index incremented: {state['current_step_index']} -> {next_index}")
+    return {"current_step_index": next_index}
+
+
 # TODO
 def generate_final_result_node(state: AgentState):
     print("---노드: 최종 결과 생성---")
@@ -235,6 +391,13 @@ workflow.add_node("search_relative_tables", search_relative_tables_node)
 workflow.add_node("generate_sql_queries", generate_sql_queries_node)
 workflow.add_node("validate_sql_query", validate_sql_query_node)
 workflow.add_node("handle_sql_feedback", handle_sql_feedback_node)
+# Iterative Python Execution Nodes
+workflow.add_node("plan_python_analysis", plan_python_analysis_node)
+workflow.add_node("generate_python_step_code", generate_python_step_code_node)
+workflow.add_node("execute_python_step", execute_python_step_node)
+workflow.add_node("validate_python_step", validate_python_step_node)
+workflow.add_node("increment_step_index", increment_step_index_node)
+# Legacy nodes (kept for compatibility if needed)
 workflow.add_node("generate_python_code", generate_python_code_node)
 workflow.add_node("execute_python_code", execute_python_code_node)
 workflow.add_node("validate_python_execution", validate_python_execution_node) # 추가
@@ -274,7 +437,7 @@ workflow.add_conditional_edges(
     "validate_sql_query",
     decide_sql_revalidation,
     {
-        "generate_python_code": "generate_python_code",
+        "generate_python_code": "plan_python_analysis",  # Use iterative approach
         "handle_sql_feedback": "handle_sql_feedback",
     },
 )
@@ -289,6 +452,24 @@ workflow.add_conditional_edges(
     },
 )
 
+# Iterative Python Execution Workflow
+workflow.add_edge("plan_python_analysis", "generate_python_step_code")
+workflow.add_edge("generate_python_step_code", "execute_python_step")
+workflow.add_edge("execute_python_step", "validate_python_step")
+
+workflow.add_conditional_edges(
+    "validate_python_step",
+    check_step_result,
+    {
+        "next_step": "increment_step_index",  # Increment and move to next step
+        "retry_step": "generate_python_step_code",  # Retry: regenerate code
+        "finalize": "generate_final_result",  # All steps complete
+    },
+)
+
+workflow.add_edge("increment_step_index", "generate_python_step_code")
+
+# Legacy Python code generation workflow (kept for reference, but not used)
 workflow.add_edge("generate_python_code", "execute_python_code")
 
 # Python 코드 실행 결과에 따른 조건부 엣지 (수정)
