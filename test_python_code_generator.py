@@ -13,14 +13,95 @@ from test_config import (
     PROMPT_SEARCH_RELATIVE_TABLES,
     PROMPT_GENERATE_SQL_QUERY,
     PROMPT_VALIDATE_SQL_QUERY,
-    PROMPT_GENERATE_PYTHON_CODE,
     PROMPT_GENERATE_FINAL_RESULT,
     PROMPT_PLAN_PYTHON_ANALYSIS,
     PROMPT_GENERATE_PYTHON_STEP,
     PROMPT_VALIDATE_PYTHON_STEP,
-    PROMPT_VALIDATE_PYTHON_EXECUTION,
 )
 from rule_rag import retrieve_relevant_rules
+
+
+def summarize_context_for_llm(context: Dict[str, Any]) -> str:
+    """Create a meaningful summary of python context for the LLM."""
+    summary_lines = []
+    
+    for var_name, value in context.items():
+        if var_name == "__builtins__":
+            continue
+        
+        # 테이블 스키마 정보 특별 처리
+        if var_name == "_table_schemas":
+            summary_lines.append("\n=== 📋 테이블 스키마 정보 (SQL 작성 시 반드시 참조) ===")
+            for table_info in value:
+                table_name = table_info.get("table", "unknown")
+                schema = table_info.get("schema", [])
+                summary_lines.append(f"  • {table_name}:")
+                for col in schema:
+                    col_name = col.get("column", "unknown")
+                    col_type = col.get("type", "")
+                    summary_lines.append(f"    - {col_name} ({col_type})")
+            summary_lines.append("=== (스키마에 없는 컬럼 사용 금지!) ===\n")
+            continue
+            
+        type_name = type(value).__name__
+        
+        # DataFrame인 경우
+        if hasattr(value, 'shape') and hasattr(value, 'columns'):
+            columns_list = list(value.columns)
+            columns_preview = columns_list[:10]  # 처음 10개 컬럼만
+            if len(columns_list) > 10:
+                columns_preview_str = f"{columns_preview}... (총 {len(columns_list)}개 컬럼)"
+            else:
+                columns_preview_str = str(columns_list)
+            summary_lines.append(
+                f"- `{var_name}`: DataFrame, shape={value.shape}, columns={columns_preview_str}"
+            )
+        # List/Tuple인 경우
+        elif isinstance(value, (list, tuple)):
+            if len(value) > 0:
+                first_item_type = type(value[0]).__name__
+                summary_lines.append(
+                    f"- `{var_name}`: {type_name}, length={len(value)}, first_item_type={first_item_type}"
+                )
+            else:
+                summary_lines.append(
+                    f"- `{var_name}`: {type_name}, length=0 (empty)"
+                )
+        # Dict인 경우
+        elif isinstance(value, dict):
+            keys_preview = list(value.keys())[:5]
+            if len(value) > 5:
+                summary_lines.append(
+                    f"- `{var_name}`: {type_name}, keys={keys_preview}... (총 {len(value)}개)"
+                )
+            else:
+                summary_lines.append(
+                    f"- `{var_name}`: {type_name}, keys={list(value.keys())}"
+                )
+        # String인 경우
+        elif isinstance(value, str):
+            preview = value[:100] + "..." if len(value) > 100 else value
+            summary_lines.append(
+                f"- `{var_name}`: {type_name}, value='{preview}'"
+            )
+        # 숫자/기본 타입인 경우
+        elif isinstance(value, (int, float, bool)):
+            summary_lines.append(
+                f"- `{var_name}`: {type_name}, value={value}"
+            )
+        # Module인 경우
+        elif type_name == 'module':
+            module_name = getattr(value, '__name__', 'unknown')
+            summary_lines.append(
+                f"- `{var_name}`: imported module '{module_name}'"
+            )
+        # 기타
+        else:
+            summary_lines.append(
+                f"- `{var_name}`: {type_name}"
+            )
+    
+    return "\n".join(summary_lines) if summary_lines else "No variables in context yet."
 
 
 class AgentState(TypedDict):
@@ -46,6 +127,8 @@ class AgentState(TypedDict):
     step_code: str
     step_result: str
     step_validation: Dict[str, Any]
+    step_retry_count: int  # 현재 단계 재시도 횟수
+    max_step_retries: int  # 단계별 최대 재시도 횟수
 
 
 def search_relative_tables_node(state: AgentState):
@@ -109,7 +192,7 @@ def validate_sql_query_node(state: AgentState):
 def decide_sql_revalidation(state: AgentState):
     print("---엣지: SQL 재검증 결정---")
     if state["sql_validation"]["is_valid"]:
-        return "generate_python_code"
+        return "plan_python_analysis"
     else:
         return "handle_sql_feedback"
 
@@ -122,123 +205,56 @@ def handle_sql_feedback_node(state: AgentState):
     return {"retry_count": retry_count, "sql_feedback": feedback}
 
 
-def generate_python_code_node(state: AgentState):
-    print("---노드: Python 코드 생성---")
-    prompt = PromptTemplate(
-        template=PROMPT_GENERATE_PYTHON_CODE,
-        input_variables=["user_query", "relative_tables", "sql_queries", "business_rules"],
-    )
-    chain = prompt | llm | StrOutputParser()
-    feedback = state.get("python_error_feedback", "") or state.get("python_validation_feedback", "")
-    if feedback:
-        feedback = f"이전에 생성한 결과와 피드백:\n{state.get('python_code')}\n{feedback}"
-    # Retrieve relevant business rules for Python
-    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
-
-    result = chain.invoke({
-        "user_query": state["user_query"],
-        "relative_tables": state["relative_tables"],
-        "business_rules": business_rules,
-        "sql_queries": state["sql_queries"],
-        "python_feedback": feedback,
-    })
-    clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", result).strip()
-    save_result(clean_code, "python_code.py", True)
-    return {"python_code": clean_code, "python_error_feedback": "", "python_validation_feedback": ""} # 피드백 사용 후 초기화
-
-
-def execute_python_code_node(state: AgentState):
-    print("---노드: Python 코드 실행---")
-    try:
-        execution_output = run_dynamic_code(state["python_code"])
-        error = execution_output["error"]
-        if error:
-            raise
-        result = execution_output["captured_output"]
-        save_result(result, "python_result.txt", True)
-        return {"python_execution_result": result}
-    except Exception:
-        error_message = f"Python 코드 실행에 실패하였습니다. 에러 발생 라인: {error.__traceback__.tb_lineno}, 에러 타입: {type(error).__name__}, 에러 메시지: {str(error)}"
-        save_result(error_message, "python_error.txt", True)
-        return {"error": error_message}
-
-
-def validate_python_execution_node(state: AgentState):
-    print("---노드: Python 코드 실행 결과 검증---")
-    prompt = PromptTemplate(
-        template=PROMPT_VALIDATE_PYTHON_EXECUTION,
-        input_variables=["user_query", "python_execution_result", "business_rules"],
-    )
-    chain = prompt | llm | JsonOutputParser()
-    # Retrieve relevant business rules for Python validation
-    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
-
-    result = chain.invoke({
-        "user_query": state["user_query"],
-        "business_rules": business_rules,
-        "python_code": state["python_code"],
-        "python_execution_result": state["python_execution_result"],
-    })
-    save_result(result, "python_validation.json", True)
-    return {"python_validation": result}
-
-
-def decide_python_reexecution(state: AgentState):
-    print("---엣지: Python 재실행 결정---")
-    if state.get("error"):
-        return "handle_python_error"
-    else:
-        return "validate_python_execution" # Python 코드 실행 성공 시 검증 노드로 이동
-
-
-def handle_python_error_node(state: AgentState):
-    print("---노드: Python 오류 처리---")
-    retry_count = state.get("retry_count", 0) + 1
-    error_message = state["error"]
-    print(f"Python 코드 실행 실패 피드백: {error_message}, 재시도 횟수: {retry_count}")
-    return {"retry_count": retry_count, "python_error_feedback": error_message, "error": ""} # 오류 메시지 사용 후 초기화
-
-
-def decide_python_validation(state: AgentState):
-    print("---엣지: Python 검증 결과 결정---")
-    if state["python_validation"]["is_valid"]:
-        return "generate_final_result"
-    else:
-        return "handle_python_validation_feedback"
-
-
-def handle_python_validation_feedback_node(state: AgentState):
-    print("---노드: Python 검증 피드백 처리---")
-    retry_count = state.get("retry_count", 0) + 1
-    feedback = state["python_validation"]["feedback"]
-    print(f"Python 검증 실패 피드백: {feedback}, 재시도 횟수: {retry_count}")
-    return {"retry_count": retry_count, "python_validation_feedback": feedback}
-
-
 def plan_python_analysis_node(state: AgentState):
     print("---노드: Python 분석 계획 수립---")
     prompt = PromptTemplate(
         template=PROMPT_PLAN_PYTHON_ANALYSIS,
         input_variables=["user_query", "relative_tables", "business_rules", "sql_queries"],
     )
-    chain = prompt | llm | JsonOutputParser()
-    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    chain = prompt | llm | StrOutputParser()
     
-    result = chain.invoke({
+    # 계획 단계에서는 비즈니스 규칙만 필요 (무엇을 해야 하는지)
+    business_rules = retrieve_relevant_rules(state["user_query"], category="common", rule_type="business")
+    
+    raw_result = chain.invoke({
         "user_query": state["user_query"],
         "relative_tables": state["relative_tables"],
         "business_rules": business_rules,
         "sql_queries": state["sql_queries"]
     })
     
-    print(f"수립된 계획: {result}")
+    # JSON 파싱 시도 (Markdown 코드 블록 제거 및 리스트 추출)
+    try:
+        # ```json ... ``` 또는 [...] 패턴 찾기
+        json_match = re.search(r'\[.*\]', raw_result, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            result = json.loads(json_str)
+        else:
+            # JSON 패턴을 못 찾으면 전체 텍스트를 줄바꿈으로 분리하여 리스트로 변환 (fallback)
+            print("⚠️ 계획 파싱 경고: JSON 리스트를 찾을 수 없어 텍스트를 줄 단위로 분리합니다.")
+            result = [line.strip() for line in raw_result.split('\n') if line.strip() and not line.strip().startswith('```')]
+            
+    except json.JSONDecodeError as e:
+        print(f"⚠️ 계획 파싱 에러: {e}. 텍스트 기반으로 처리합니다.")
+        result = [line.strip() for line in raw_result.split('\n') if line.strip() and not line.strip().startswith('```')]
+
     save_result(result, "python_plan.json", True)
+    
+    # 테이블 스키마를 python_context에 포함 (코드 생성 시 참조용)
+    schema_info = {
+        "_table_schemas": state["relative_tables"],
+        "sql_queries": state["sql_queries"],  # SQL 쿼리 리스트 추가
+        "__builtins__": __builtins__
+    }
     
     return {
         "python_plan": result,
         "current_step_index": 0,
-        "python_context": {"__builtins__": __builtins__}, # 초기 컨텍스트
-        "python_code": "" # 전체 코드 누적용
+        "python_context": schema_info,
+        "python_code": "",
+        "step_retry_count": 0,  # 초기 retry count
+        "max_step_retries": 3   # 단계별 최대 3회 재시도
     }
 
 
@@ -252,13 +268,20 @@ def generate_python_step_code_node(state: AgentState):
     
     prompt = PromptTemplate(
         template=PROMPT_GENERATE_PYTHON_STEP,
-        input_variables=["user_query", "business_rules", "python_plan", "current_step", "python_context", "step_feedback"],
+        input_variables=["user_query", "business_rules", "python_rules", "python_plan", "current_step", "python_context", "step_feedback"],
     )
     chain = prompt | llm | StrOutputParser()
-    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
     
-    # Context summary for prompt
-    context_summary = {k: type(v).__name__ for k, v in state["python_context"].items() if k != "__builtins__"}
+    # 현재 단계 context를 포함하여 더 정확한 규칙 검색
+    combined_query = f"{state['user_query']} {current_step}"
+    
+    # 비즈니스 규칙 (메트릭 정의, 데이터 관계 등)
+    business_rules = retrieve_relevant_rules(combined_query, category="common", rule_type="business")
+    # Python 규칙 (Block Logic 구현, 코드 작성 가이드라인 등)
+    python_rules = retrieve_relevant_rules(combined_query, category="python", rule_type="python")
+    
+    # ✅ 개선된 컨텍스트 요약 - DataFrame 구조, 변수 값 등 상세 정보 제공
+    context_summary = summarize_context_for_llm(state["python_context"])
     
     # Get feedback if retry
     step_feedback = state.get("step_validation", {}).get("feedback", "")
@@ -268,17 +291,40 @@ def generate_python_step_code_node(state: AgentState):
     code = chain.invoke({
         "user_query": state["user_query"],
         "business_rules": business_rules,
+        "python_rules": python_rules,
         "python_plan": plan,
         "current_step": current_step,
         "python_context": context_summary,
         "step_feedback": step_feedback
     })
     
+    # Retry count 증가
+    current_retry = state.get("step_retry_count", 0)
+    
     clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", code).strip()
     print(f"생성된 코드:\n{clean_code}")
     
+    # 프롬프트 및 결과 로깅
+    log_data = {
+        "step": f"{current_index + 1}/{len(plan)}",
+        "step_description": current_step,
+        "retry_count": current_retry,
+        "prompt_inputs": {
+            "user_query": state["user_query"],
+            "current_step": current_step,
+            "business_rules": business_rules[:200] + "..." if len(business_rules) > 200 else business_rules,
+            "python_rules": python_rules[:200] + "..." if len(python_rules) > 200 else python_rules,
+            "context_summary": context_summary[:300] + "..." if len(context_summary) > 300 else context_summary,
+            "step_feedback": step_feedback[:200] + "..." if step_feedback and len(step_feedback) > 200 else step_feedback
+        },
+        "generated_code": clean_code
+    }
+    save_result(log_data, f"step_{current_index + 1}_code_gen_retry_{current_retry}.json", False)
+    
     return {
-        "step_code": clean_code
+        "step_code": clean_code,
+        "step_validation": {},  # Clear validation to prevent stale feedback
+        "step_retry_count": current_retry + 1  # 재시도 카운트 증가
     }
 
 
@@ -324,14 +370,22 @@ def validate_python_step_node(state: AgentState):
     
     prompt = PromptTemplate(
         template=PROMPT_VALIDATE_PYTHON_STEP,
-        input_variables=["user_query", "business_rules", "current_step", "step_code", "step_result"],
+        input_variables=["user_query", "business_rules", "python_rules", "current_step", "step_code", "step_result"],
     )
     chain = prompt | llm | JsonOutputParser()
-    business_rules = retrieve_relevant_rules(state["user_query"], category="python")
+    
+    # 현재 단계 context를 포함하여 더 정확한 규칙 검색
+    combined_query = f"{state['user_query']} {current_step}"
+    
+    # 비즈니스 규칙 (메트릭 정의, 데이터 관계 등)
+    business_rules = retrieve_relevant_rules(combined_query, category="common", rule_type="business")
+    # Python 규칙 (Block Logic 구현, 코드 작성 가이드라인 등)
+    python_rules = retrieve_relevant_rules(combined_query, category="python", rule_type="python")
     
     result = chain.invoke({
         "user_query": state["user_query"],
         "business_rules": business_rules,
+        "python_rules": python_rules,
         "current_step": current_step,
         "step_code": state["step_code"],
         "step_result": state["step_result"]
@@ -354,15 +408,26 @@ def check_step_result(state: AgentState):
             print("모든 단계 완료, 최종 결과 생성")
             return "finalize"
     else:
-        print(f"현재 단계 재시도: {state['current_step_index'] + 1}/{len(state['python_plan'])}")
-        return "retry_step"
+        # Check retry limit
+        retry_count = state.get("step_retry_count", 0)
+        max_retries = state.get("max_step_retries", 3)
+        
+        if retry_count >= max_retries:
+            print(f"⚠️  단계 재시도 한계 초과 ({retry_count}/{max_retries}). 최종 결과로 이동.")
+            return "finalize"  # 재시도 한계 초과 시 강제로 종료
+        else:
+            print(f"현재 단계 재시도: {retry_count + 1}/{max_retries} (단계: {state['current_step_index'] + 1}/{len(state['python_plan'])})")
+            return "retry_step"
 
 
 def increment_step_index_node(state: AgentState):
     """Move to next step by incrementing the index."""
     next_index = state["current_step_index"] + 1
     print(f"Step index incremented: {state['current_step_index']} -> {next_index}")
-    return {"current_step_index": next_index}
+    return {
+        "current_step_index": next_index,
+        "step_retry_count": 0  # 새 단계로 이동 시 retry count 초기화
+    }
 
 
 # TODO
@@ -397,12 +462,6 @@ workflow.add_node("generate_python_step_code", generate_python_step_code_node)
 workflow.add_node("execute_python_step", execute_python_step_node)
 workflow.add_node("validate_python_step", validate_python_step_node)
 workflow.add_node("increment_step_index", increment_step_index_node)
-# Legacy nodes (kept for compatibility if needed)
-workflow.add_node("generate_python_code", generate_python_code_node)
-workflow.add_node("execute_python_code", execute_python_code_node)
-workflow.add_node("validate_python_execution", validate_python_execution_node) # 추가
-workflow.add_node("handle_python_error", handle_python_error_node)
-workflow.add_node("handle_python_validation_feedback", handle_python_validation_feedback_node) # 추가
 workflow.add_node("generate_final_result", generate_final_result_node)
 
 # --- 엣지 조건부 함수 정의 ---
@@ -412,20 +471,6 @@ def decide_sql_retry(state: AgentState):
         return "end_with_error"
     else:
         return "generate_sql_queries"
-
-def decide_python_retry(state: AgentState):
-    print("---엣지: Python 재시도 결정---")
-    if state["retry_count"] > state["max_retries"]:
-        return "end_with_error"
-    else:
-        return "generate_python_code"
-
-def decide_python_validation_retry(state: AgentState):
-    print("---엣지: Python 검증 재시도 결정---")
-    if state["retry_count"] > state["max_retries"]:
-        return "end_with_error"
-    else:
-        return "generate_python_code" # 검증 실패 시 Python 코드 재생성으로 이동
 
 # --- 엣지 추가 ---
 workflow.set_entry_point("search_relative_tables")
@@ -437,7 +482,7 @@ workflow.add_conditional_edges(
     "validate_sql_query",
     decide_sql_revalidation,
     {
-        "generate_python_code": "plan_python_analysis",  # Use iterative approach
+        "plan_python_analysis": "plan_python_analysis",  # Use iterative approach
         "handle_sql_feedback": "handle_sql_feedback",
     },
 )
@@ -469,49 +514,6 @@ workflow.add_conditional_edges(
 
 workflow.add_edge("increment_step_index", "generate_python_step_code")
 
-# Legacy Python code generation workflow (kept for reference, but not used)
-workflow.add_edge("generate_python_code", "execute_python_code")
-
-# Python 코드 실행 결과에 따른 조건부 엣지 (수정)
-workflow.add_conditional_edges(
-    "execute_python_code",
-    decide_python_reexecution,
-    {
-        "validate_python_execution": "validate_python_execution", # 실행 성공 시 검증 노드로
-        "handle_python_error": "handle_python_error",
-    },
-)
-
-# Python 오류 처리 후 재시도 여부 결정 엣지
-workflow.add_conditional_edges(
-    "handle_python_error",
-    decide_python_retry,
-    {
-        "generate_python_code": "generate_python_code", # 재시도
-        "end_with_error": "end_with_error",             # 재시도 횟수 초과 시
-    },
-)
-
-# Python 검증 결과에 따른 조건부 엣지 (추가)
-workflow.add_conditional_edges(
-    "validate_python_execution",
-    decide_python_validation,
-    {
-        "generate_final_result": "generate_final_result",
-        "handle_python_validation_feedback": "handle_python_validation_feedback",
-    },
-)
-
-# Python 검증 피드백 처리 후 재시도 여부 결정 엣지 (추가)
-workflow.add_conditional_edges(
-    "handle_python_validation_feedback",
-    decide_python_validation_retry,
-    {
-        "generate_python_code": "generate_python_code", # 재시도
-        "end_with_error": "end_with_error",             # 재시도 횟수 초과 시
-    },
-)
-
 # 최종 결과 생성 및 오류 종료 엣지
 workflow.add_edge("generate_final_result", END)
 workflow.add_node("end_with_error", generate_final_result_node) # 최종 오류 처리 노드
@@ -525,9 +527,9 @@ if __name__ == "__main__":
     user_query = input("무엇을 도와드릴까요? ")
     
     # 디버그: 입력값 확인
-    print(f"\n[DEBUG] 받은 질문: {user_query}")
-    print(f"[DEBUG] 질문 길이: {len(user_query)}자")
-    print(f"[DEBUG] 질문 repr: {repr(user_query)}\n")
+    # print(f"\n[DEBUG] 받은 질문: {user_query}")
+    # print(f"[DEBUG] 질문 길이: {len(user_query)}자")
+    # print(f"[DEBUG] 질문 repr: {repr(user_query)}\n")
     
     initial_state = {
         "user_query": user_query,
@@ -537,6 +539,6 @@ if __name__ == "__main__":
         "sql_feedback": "",
         "python_error_feedback": ""
     }
-    final_state = app.invoke(initial_state)
+    final_state = app.invoke(initial_state, config={"recursion_limit": 150})
     print("\n--- 최종 결과 ---")
     print(final_state.get("final_result", "오류로 인해 최종 결과를 생성하지 못했습니다."))

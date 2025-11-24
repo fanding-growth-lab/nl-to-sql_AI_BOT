@@ -33,7 +33,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # LangChain 모델 초기화
-llm = ChatGoogleGenerativeAI(model="gemini-3-pro-preview", google_api_key=GOOGLE_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY)
 
 
 # === GLOBAL FUNCTIONS ===
@@ -205,22 +205,33 @@ PROMPT_PLAN_PYTHON_ANALYSIS = """
 SQL 쿼리문:
 {sql_queries}
 
+**중요 원칙 (반드시 준수)**:
+- **한 단계는 하나의 명확한 목적만**: 여러 테이블 조회, 여러 데이터 처리를 하나의 단계에 넣지 마세요
+- 각 단계는 독립적으로 실행 가능해야 합니다
+- 단계별로 생성된 변수는 다음 단계에서 재사용됩니다
+- 에러 발생 시 해당 단계만 재실행되므로, 단계를 작게 나누는 것이 중요합니다
+
 가이드라인:
-1. **데이터 로딩**: SQL 쿼리 결과를 DataFrame으로 로드하는 단계로 시작하세요.
+1. **데이터 로딩은 테이블별로 분리**: 
+   - 작가/크리에이터 정보 조회 (1단계)
+   - Payment 데이터 조회 (2단계)
+   - Membership 데이터 조회 (3단계)
 2. **전처리 및 파생변수 생성**: 날짜 변환, 결측치 처리, 필요한 파생 변수(예: Block ID) 생성을 별도 단계로 분리하세요.
    - **중요**: 멤버십 분석 시 "Membership Block Logic" 적용 단계를 반드시 포함하세요.
 3. **필터링 및 추출**: 분석 대상 기간이나 조건에 맞는 데이터 필터링 단계를 포함하세요.
 4. **집계 및 계산**: GroupBy, Pivot 등을 이용한 집계 단계를 포함하세요.
 5. **최종 결과 도출**: 최종적인 숫자나 표를 도출하는 단계를 포함하세요.
 
-출력 형식:
+출력 형식 예시 (단계를 세분화):
 ```json
 [
-    "1. SQL 쿼리 실행 및 데이터 로드",
-    "2. t_fanding_log 데이터를 이용해 Membership Block 생성",
-    "3. 25년 11월 기준 활성 회원 필터링",
-    "4. 월별 방문자 수 집계",
-    "5. 최종 결과 출력"
+    "1. 작가 정보 조회 (nickname으로 creator_no 식별)",
+    "2. Payment 데이터 조회 및 날짜 변환",
+    "3. Membership(t_fanding_log) 데이터 조회 및 날짜 변환",
+    "4. Membership Block Logic 적용하여 Block 생성",
+    "5. 월별 활성 회원 필터링 및 신규/기존 구분",
+    "6. 월별 매출액 집계",
+    "7. 최종 결과 병합 및 출력"
 ]
 ```
 """
@@ -235,6 +246,9 @@ PROMPT_GENERATE_PYTHON_STEP = f"""
 비즈니스 규칙:
 {{business_rules}}
 
+Python 규칙:
+{{python_rules}}
+
 전체 계획:
 {{python_plan}}
 
@@ -246,12 +260,28 @@ PROMPT_GENERATE_PYTHON_STEP = f"""
 
 {{step_feedback}}
 
-작성 가이드:
-1. **현재 단계**의 목표를 달성하는 코드만 작성하세요.
-2. 이전 단계에서 생성된 변수(DataFrame 등)를 그대로 사용하세요. (새로 로드하지 마세요)
-3. 필요한 라이브러리가 있다면 import 하세요. (pandas as pd, numpy as np 등)
-4. 결과는 변수에 저장하거나 `print()`로 출력하세요.
-5. **Block Logic** 등 복잡한 로직은 비즈니스 규칙의 [Code Example]을 참고하여 정확히 구현하세요.
+**❗ 중요: 테이블 스키마 준수 (반드시 확인)**
+- python_context에 '_table_schemas' 키가 있습니다. 여기에 모든 테이블의 스키마 정보가 포함되어 있습니다.
+- SQL 쿼리 작성 시 **반드시** 해당 스키마에 존재하는 컬럼만 사용하세요.
+- 스키마에 없는 컬럼을 사용하면 에러가 발생합니다.
+- 예: t_fanding_log에 'member_no' 컬럼이 없다면 절대 사용하지 마세요.
+
+**중요 원칙 (반드시 준수)**:
+1. **첫 단계 필수 작업**: 
+   - 만약 현재 단계가 **첫 번째 단계(1단계)**라면, 반드시 `sqlalchemy.create_engine`을 사용하여 DB 연결을 설정하세요.
+   - `engine` 변수에 할당해야 다음 단계에서 재사용 가능합니다.
+   - DB URL: `mysql+pymysql://readonly_user_business_data:Fanding!Data!@epic-readonly.ceind7azkfjy.ap-northeast-2.rds.amazonaws.com:3306/fanding?charset=utf8mb4`
+2. **SQL 쿼리 사용**:
+   - `python_context['sql_queries']`에 SQL 쿼리들이 리스트로 저장되어 있습니다.
+   - 이를 활용하거나, 필요시 직접 쿼리를 작성하세요.
+3. **현재 단계만 처리** - 이 단계의 목표만 달성하세요. 다음 단계 작업은 절대 포함하지 마세요.
+4. **이전 변수 재사용 (매우 중요)**:
+   - `python_context`에 이미 존재하는 변수(DataFrame 등)를 **반드시** 그대로 사용하세요.
+   - **절대** 모의 데이터(Mock Data)를 생성하지 마세요. 이전 단계에서 생성된 데이터가 있다고 가정하세요.
+   - 변수명을 정확히 확인하세요. 오타(예: `_existing_existing_`)를 주의하세요.
+5. **라이브러리 import** - 필요한 라이브러리는 단계 내에서 import 하세요 (pandas as pd, numpy as np 등).
+6. **결과 출력** - 최종 결과는 반드시 `print()`로 출력하세요. 중간 과정도 필요시 출력하세요.
+7. **Code Example 참고** - 복잡한 로직(Block Logic 등)은 비즈니스/Python 규칙의 [Code Example]을 정확히 따르세요.
 
 출력 형식:
 ```python
@@ -268,6 +298,9 @@ PROMPT_VALIDATE_PYTHON_STEP = """
 비즈니스 규칙:
 {business_rules}
 
+Python 규칙:
+{python_rules}
+
 현재 단계:
 {current_step}
 
@@ -277,118 +310,15 @@ PROMPT_VALIDATE_PYTHON_STEP = """
 실행 결과:
 {step_result}
 
-검증 기준:
-1. 코드가 에러 없이 실행되었는가?
-2. **현재 단계**의 목표를 달성했는가?
-3. 비즈니스 규칙(특히 Block Logic 등)을 위반하지 않았는가?
-4. 데이터가 의도대로 변환/생성되었는가? (결과값 확인)
+**검증 기준 (반드시 확인)**:
+1. **실행 성공** - 코드가 에러 없이 정상 실행되었는가?
+2. **단계 목표 달성** - 현재 단계에서 요구한 작업이 완료되었는가?
+3. **비즈니스 규칙 준수** - 비즈니스 규칙(Block Logic, 메트릭 정의 등)을 정확히 따랐는가?
+4. **데이터 정합성** - 생성/변환된 데이터가 의도대로 올바르게 처리되었는가? (결과값 확인)
 
 출력 형식:
 ```json
 {{"is_valid": <true 또는 false>, "feedback": <true인 경우 빈 문자열, false인 경우 수정이 필요한 구체적인 피드백>}}
-```
-"""
-
-PROMPT_GENERATE_PYTHON_CODE = f"""
-사용자 질문, 관련 테이블 정보, SQL 쿼리문들을 활용하여 실제의 데이터를 분석하거나 비교하는 실행 가능한 파이썬 코드를 작성합니다.
-출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
-
-사용자 질문:
-{{user_query}}
-
-관련 테이블 정보:
-{{relative_tables}}
-
-비즈니스 규칙:
-{{business_rules}}
-
-SQL 쿼리문:
-{{sql_queries}}
-
-{{python_feedback}}
-
-규칙:
-- (실제 데이터로 정상 동작하는 코드 작성) 더미 데이터나 테스트용 코드를 작성하지 않고 실제 데이터로 정상 동작하는 코드를 작성한다. 
-
-- (데이터 불러오기) 주어진 SQL 쿼리문들을 활용하여 실제 데이터베이스에서 필요한 데이터를 `pandas.DataFrame` 형태로 가져온다.
-  - 데이터 로딩 후 불필요한 DataFrame 복사(copy())는 하지 않는다.
-  - datetime 변환은 필요한 컬럼만 최소한으로 적용한다.
-  - 아래 파이썬 코드를 사용해 데이터베이스에 연결하고 SQL문을 실행한다.
-
-```python
-import pandas as pd
-from sqlalchemy import create_engine, text
-
-engine = create_engine(
-    f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset={DB_CHARSET}",
-    echo=False  # SQL 로그를 보고 싶으면 True
-)
-query = "SELECT 1;"
-df = pd.read_sql(text(query), engine)    
-```
-
-- (데이터 병합 및 가공) 사용자 질문의 요구사항에 맞게 필요한 테이블을 merge 또는 boolean filtering 한다.
-  - merge 시 필요한 컬럼만 선택하여 메모리 사용량과 실행 시간을 줄인다.
-  - 가능할 경우 merge → groupby 순으로 최소한의 파이프라인을 구성한다.
-
-- (집계 / 분석 / 비교) 사용자 질문에 대한 적절한 답변을 생성하기 위해 "집계", "분석", "비교" 등의 작업을 진행한다.
-  - groupby는 한 번에 필요한 집계를 수행하여 중복 groupby 호출을 최소화한다.
-  - row 단위 apply(axis=1)는 절대 사용하지 않는다.
-    - 대신 pandas의 벡터 연산 또는 np.where / Series.map 등을 사용해 계산한다.
-
-- (Membership Block Logic 구현 - 필수) 멤버십 분석 시 반드시 Block Logic을 구현해야 한다.
-  - RAG를 통해 제공된 [Code Example]을 참고하여 구현한다.
-
-- (활성 회원 계산 - Block 기반) 월말 기준 활성 회원은 반드시 Block 기반으로 계산한다:
-  - RAG를 통해 제공된 [Code Example]을 참고하여 구현한다.
-
-- (일별 평균 방문자 계산) 포스트 조회 로그에서 일별 unique 방문자의 평균을 계산한다:
-  - RAG를 통해 제공된 [Code Example]을 참고하여 구현한다.
-
-- (시각화) 시각적 비교나 트렌드가 필요한 경우 matplotlib 또는 seaborn을 활용한다.
-  - 시각화는 최소한의 데이터만 사용하여 불필요한 연산을 방지한다.
-  - 그래프 출력은 선택적이며 반드시 `plt.show()`로 끝내야 한다.
-  - matplotlib 사용 시 한국어 깨짐 방지를 위해 아래의 코드를 삽입한다.
-
-```py
-plt.rcParams['font.family'] = 'Malgun Gothic'
-plt.rcParams['axes.unicode_minus'] = False
-```
-
-- (보안 및 안정성) 외부 API 호출, 파일 저장, 시스템 명령어 사용 등은 금지한다. pandas, matplotlib, numpy 등 기본 라이브러리만 사용한다.
-  - while문이나 재귀함수 사용 시 무한 loop에 걸리지 않게 꼭 주의한다. 
-
-- (출력 형식) 함수 정의, 변수명, 주석을 포함한 실행 가능한 코드를 작성한다.
-  - 주요 결과는 반드시 `print()`로 출력한다.
-  - 설명 문장이나 해설을 출력하지 말고 코드만 반환한다.
-"""
-
-PROMPT_VALIDATE_PYTHON_EXECUTION = """
-생성된 파이썬 코드의 실행 결과가 아래의 규칙들을 잘 지키는지 검증하고 종합하여 최종 판단을 내립니다.
-출력 형식 외의 다른 설명이나 주석, 텍스트를 붙이지 않습니다.
-
-사용자 질문:
-{user_query}
-
-비즈니스 규칙:
-{business_rules}
-
-파이썬 코드:
-{python_code}
-
-파이썬 코드 실행 결과:
-{python_execution_result}
-
-규칙:
-1. (비즈니스 규칙 검증) 비즈니스 규칙을 잘 따르고 있는가? (반드시 예)
-  - 특히 "신규 회원", "기존 회원", "이탈" 등의 정의가 복잡한 지표를 단순 집계(groupby)로 처리하지 않고, 규칙에 명시된 로직(예: Block Logic, 날짜 차이 계산 등)을 통해 구현했는가?
-2. (정합성 검증) 사용자 질문의 요구사항에 맞는 데이터 분석 및 비교 작업이 이루어졌는가? (반드시 예)
-3. (최적화 검증) 데이터 로딩 후 불필요한 DataFrame 복사(copy())는 하지 않고 있는가? (반드시 예)
-4. (최적화 검증) merge, group by, apply 함수는 효율을 고려하여 작성되었는가? (반드시 예)
-
-출력 형식:
-```json
-{{"is_valid": <true 또는 false>, "feedback": <true인 경우 빈 문자열, false인 경우 검증 결과를 바탕으로 파이썬 코드를 개선하기 위해 필요한 내용>}}
 ```
 """
 
