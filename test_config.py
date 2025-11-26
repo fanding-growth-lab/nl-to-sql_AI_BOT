@@ -192,7 +192,9 @@ PROMPT_VALIDATE_SQL_QUERY = """
 
 PROMPT_PLAN_PYTHON_ANALYSIS = """
 사용자 질문을 해결하기 위한 파이썬 데이터 분석 단계를 절차적으로 계획합니다.
-각 단계는 명확하고 실행 가능한 작업 단위여야 합니다.
+
+**Least-to-Most Decomposition Strategy**
+문제를 가장 작은 단위부터 순차적으로 해결합니다.
 
 사용자 질문:
 {user_query}
@@ -206,87 +208,136 @@ PROMPT_PLAN_PYTHON_ANALYSIS = """
 SQL 쿼리문:
 {sql_queries}
 
-**중요 원칙 (반드시 준수)**:
-- **한 단계는 하나의 명확한 목적만**: 여러 테이블 조회, 여러 데이터 처리를 하나의 단계에 넣지 마세요
-- 각 단계는 독립적으로 실행 가능해야 합니다
-- 단계별로 생성된 변수는 다음 단계에서 재사용됩니다
-- 에러 발생 시 해당 단계만 재실행되므로, 단계를 작게 나누는 것이 중요합니다
+---
 
-가이드라인:
-1. **데이터 로딩은 테이블별로 분리**: 
-   - 작가/크리에이터 정보 조회 (1단계)
-   - Payment 데이터 조회 (2단계)
-   - Membership 데이터 조회 (3단계)
-2. **전처리 및 파생변수 생성**: 날짜 변환, 결측치 처리, 필요한 파생 변수(예: Block ID) 생성을 별도 단계로 분리하세요.
-   - **중요**: 멤버십 분석 시 "Membership Block Logic" 적용 단계를 반드시 포함하세요.
-3. **필터링 및 추출**: 분석 대상 기간이나 조건에 맞는 데이터 필터링 단계를 포함하세요.
-4. **집계 및 계산**: GroupBy, Pivot 등을 이용한 집계 단계를 포함하세요.
-5. **최종 결과 도출**: 최종적인 숫자나 표를 도출하는 단계를 포함하세요.
+**🎯 Step 1: 질문 분석 및 필요 데이터 파악**
+1. **최종 목표**: 무엇을 계산/분석해야 하는가?
+2. **필요한 핵심 데이터**: 어떤 테이블/컬럼이 필요한가?
+3. **복잡한 로직 유무**: Block Logic, 집계, 비율 계산 등이 필요한가?
+4. **의존성 관계**: 어떤 데이터를 먼저 처리해야 하는가?
 
-출력 형식 예시 (단계를 세분화):
+**🧩 Step 2: 단계 분해 (Decomposition)**
+
+**분해 원칙 (반드시 준수)**:
+1. **Atomic Steps**: 한 단계는 단 하나의 명확한 작업만
+   - 여러 테이블 조회 금지 → 테이블당 1단계
+   - 여러 변환 작업 금지 → 변환당 1단계
+
+2. **Dependency Order**: 의존성 없는 것부터 시작
+   - DB 연결, 기본 데이터 조회
+   - 결과가 다음 단계의 입력이 되도록 배치
+
+3. **Error Isolation**: 에러 발생 시 해당 단계만 재실행
+   - Block Logic 등 복잡한 로직은 별도 단계로
+
+4. **Progressive Complexity**: 점진적 복잡도 증가
+   - 간단(로딩) → 중간(전처리) → 복잡(집계) → 최종(출력)
+
+**단계 분해 템플릿**:
+```
+Phase 1: 데이터 준비 
+├─ Step 1: DB 연결 설정 
+├─ Step 2: 테이블 A 조회 
+└─ Step 3: 테이블 B 조회
+Phase 2: 전처리 
+├─ Step 4: 날짜 변환 (테이블 A) 
+└─ Step 5: 결측치 처리
+Phase 3: 핵심 로직 
+├─ Step 6: Block Logic 적용 
+└─ Step 7: 집계 및 계산
+Phase 4: 최종화 
+├─ Step 8: 결과 병합 
+└─ Step 9: 최종 출력
+```
+
+**🔍 Step 3: 각 단계에 명확한 설명 추가**
+형식: "[번호]. [동사] [대상] ([세부사항])"
+예: "3. 조회 Payment 데이터 (remain_price, pay_datetime 포함)"
+
+**체크리스트**:
+□ 첫 단계에 DB 연결(engine) 생성 포함?
+□ 테이블 조회를 각각 분리?
+□ Block Logic 같은 복잡한 로직을 단독 단계로?
+□ 각 단계가 5-10줄 이내의 코드로 구현 가능?
+
+**출력 형식** (JSON 리스트):
+
 ```json
 [
-    "1. 작가 정보 조회 (nickname으로 creator_no 식별)",
-    "2. Payment 데이터 조회 및 날짜 변환",
-    "3. Membership(t_fanding_log) 데이터 조회 및 날짜 변환",
-    "4. Membership Block Logic 적용하여 Block 생성",
-    "5. 월별 활성 회원 필터링 및 신규/기존 구분",
-    "6. 월별 매출액 집계",
-    "7. 최종 결과 병합 및 출력"
+    "1. 생성 DB 연결 엔진 (engine 변수 초기화)",
+    "2. 조회 크리에이터 정보 (nickname으로 creator_no 매칭)",
+    "3. 조회 Payment 데이터 (remain_price 포함)",
+    "4. 변환 날짜 컬럼 (pay_datetime)",
+    "5. 집계 월별 매출액",
+    "6. 출력 최종 결과"
 ]
 ```
 """
 
-PROMPT_GENERATE_PYTHON_STEP = f"""
-현재 계획된 분석 단계에 맞춰 파이썬 코드를 작성합니다.
-이전 단계에서 생성된 변수들을 사용할 수 있습니다.
+PROMPT_GENERATE_PYTHON_STEP = """
+**🧠 Chain-of-Thought Code Generation**
 
-사용자 질문:
-{{user_query}}
+코드를 바로 작성하지 말고, 먼저 추론 과정을 거친 후 코드를 작성하세요.
 
-비즈니스 규칙:
-{{business_rules}}
+# 기본 정보
+사용자 질문: {user_query}
+비즈니스 규칙: {business_rules}
+Python 규칙: {python_rules}
+전체 계획: {python_plan}
+현재 진행할 단계: {current_step}
+이전 컨텍스트: {python_context}
 
-Python 규칙:
-{{python_rules}}
+{step_feedback}
 
-전체 계획:
-{{python_plan}}
+---
 
-**현재 진행할 단계**:
-{{current_step}}
+**📍 Step 1: 현재 단계 이해 및 추론**
 
-**이전 단계까지의 실행 컨텍스트 (변수 목록), python_context**:
-{{python_context}}
+1.1 목표 명확화
+- Q: 이 단계의 정확한 목표는?
+- Q: 어떤 데이터를 입력으로 받아 어떤 결과를 출력?
 
-{{step_feedback}}
+1.2 필요 데이터 파악
+- Q: 필요한 데이터/변수는?
+- Q: python_context에 이미 존재하는가?
 
-**❗ 중요: 테이블 스키마 준수 (반드시 확인)**
-- python_context에 '_table_schemas' 키가 있습니다. 여기에 모든 테이블의 스키마 정보가 포함되어 있습니다.
-- SQL 쿼리 작성 시 **반드시** 해당 스키마에 존재하는 컬럼만 사용하세요.
-- 스키마에 없는 컬럼을 사용하면 에러가 발생합니다.
-- 예: t_fanding_log에 'member_no' 컬럼이 없다면 절대 사용하지 마세요.
+1.3 알고리즘 설계
+- Q: 어떤 순서로 처리할 것인가?
+- Q: 어떤 pandas 함수를 사용할 것인가?
+- Q: 비즈니스 규칙 중 이 단계와 관련된 것은?
+- Q: Python 규칙의 Code Example 중 참고할 것은?
 
-**중요 원칙 (반드시 준수)**:
-1. **첫 단계 필수 작업**: 
-   - 만약 현재 단계가 **첫 번째 단계(1단계)**라면, 반드시 `sqlalchemy.create_engine`을 사용하여 DB 연결을 설정하세요.
-   - `engine` 변수에 할당해야 다음 단계에서 재사용 가능합니다.
-   - DB URL: `mysql+pymysql://readonly_user_business_data:Fanding!Data!@epic-readonly.ceind7azkfjy.ap-northeast-2.rds.amazonaws.com:3306/fanding?charset=utf8mb4`
-2. **SQL 쿼리 사용**:
-   - `python_context['sql_queries']`에 SQL 쿼리들이 리스트로 저장되어 있습니다.
-   - 이를 활용하거나, 필요시 직접 쿼리를 작성하세요.
-3. **현재 단계만 처리** - 이 단계의 목표만 달성하세요. 다음 단계 작업은 절대 포함하지 마세요.
-4. **이전 변수 재사용 (매우 중요)**:
-   - `python_context`에 이미 존재하는 변수(DataFrame 등)를 **반드시** 그대로 사용하세요.
-   - **절대** 모의 데이터(Mock Data)를 생성하지 마세요. 이전 단계에서 생성된 데이터가 있다고 가정하세요.
-   - 변수명을 정확히 확인하세요. 오타(예: `_existing_existing_`)를 주의하세요.
-5. **라이브러리 import** - 필요한 라이브러리는 단계 내에서 import 하세요 (pandas as pd, numpy as np 등).
-6. **결과 출력** - 최종 결과는 반드시 `print()`로 출력하세요. 중간 과정도 필요시 출력하세요.
-7. **Code Example 참고** - 복잡한 로직(Block Logic 등)은 비즈니스/Python 규칙의 [Code Example]을 정확히 따르세요.
+1.4 예상 문제 및 검증
+- Q: 어떤 에러가 발생할 수 있는가?
+- Q: step_feedback에 언급된 문제는? (재시도인 경우)
+- Q: Edge case는? (빈 데이터, NULL 값)
 
-출력 형식:
-```python
-# 코드 작성
+---
+
+**📍 Step 2: 스키마 확인 (필수)**
+- python_context의 '_table_schemas' 확인
+- SQL 작성 시 스키마에 존재하는 컬럼만 사용
+
+**📍 Step 3: 코드 작성 원칙**
+1. 첫 단계라면 DB 연결 필수
+2. 이전 변수 재사용 (Mock Data 생성 금지)
+3. 현재 단계만 처리
+4. 비즈니스 규칙 준수
+5. Python 규칙의 Code Example 참고
+6. print()로 결과 출력
+
+---
+
+**📍 Step 4: 출력 형식 (JSON)**
+
+```json
+{{
+    "reasoning": "추론 과정 (200자 이내 요약)",
+    "approach": "알고리즘/접근법 (핵심 단계 3-5개)",
+    "expected_output": "예상 결과 형태",
+    "potential_issues": "예상 문제점 및 대응",
+    "code": "Python 코드"
+}}
 ```
 """
 

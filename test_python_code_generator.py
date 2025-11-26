@@ -289,7 +289,7 @@ def generate_python_step_code_node(state: AgentState):
     if step_feedback:
         step_feedback = f"이전 시도 피드백:\n{step_feedback}"
     
-    code = chain.invoke({
+    raw_output = chain.invoke({
         "user_query": state["user_query"],
         "business_rules": business_rules,
         "python_rules": python_rules,
@@ -302,14 +302,52 @@ def generate_python_step_code_node(state: AgentState):
     # Retry count 증가
     current_retry = state.get("step_retry_count", 0)
     
-    clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", code).strip()
-    print(f"생성된 코드:\n{clean_code}")
+    # Parse JSON output with CoT reasoning
+    clean_code = ""
+    reasoning = ""
+    approach = ""
+    expected_output = ""
+    potential_issues = ""
+    try:
+        # Try to extract JSON from response
+        json_match = re.search(r'\{[\s\S]*"code"[\s\S]*\}', raw_output)  # ← raw_output은 chain.invoke() 결과
+        if json_match:
+            json_str = json_match.group(0)
+            result = json.loads(json_str)
+            
+            # Extract fields
+            reasoning = result.get("reasoning", "")
+            approach = result.get("approach", "")
+            expected_output = result.get("expected_output", "")
+            potential_issues = result.get("potential_issues", "")
+            clean_code = result.get("code", "")
+            
+            # Log CoT reasoning
+            print(f"\n🧠 추론: {reasoning}")
+            print(f"📐 접근법: {approach}")
+            if potential_issues:
+                print(f"⚠️  예상 문제: {potential_issues}\n")
+        else:
+            # Fallback
+            print("⚠️  JSON 파싱 실패, 일반 코드로 처리")
+            clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", raw_output).strip()
+            
+    except json.JSONDecodeError as e:
+        print(f"⚠️  JSON 에러: {e}, 폴백 처리")
+        clean_code = re.sub(r"```(?:python)?\s*([\s\S]*?)\s*```", r"\1", raw_output).strip()
+    print(f"\n생성된 코드:\n{clean_code}")
     
     # 프롬프트 및 결과 로깅
     log_data = {
         "step": f"{current_index + 1}/{len(plan)}",
         "step_description": current_step,
         "retry_count": current_retry,
+        "cot_reasoning": {  # ← 새로 추가
+            "reasoning": reasoning,
+            "approach": approach,
+            "expected_output": expected_output,
+            "potential_issues": potential_issues
+        },
         "prompt_inputs": {
             "user_query": state["user_query"],
             "current_step": current_step,
