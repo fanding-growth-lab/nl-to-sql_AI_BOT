@@ -53,6 +53,7 @@ def save_result(result, output_filename: str, verbose=False):
     return file_path
 
 import sys
+import traceback
 from io import StringIO
 
 def run_dynamic_code(code: str, context: dict = None):
@@ -77,7 +78,7 @@ def run_dynamic_code(code: str, context: dict = None):
         exec(code, context, local_env)
         captured_output = redirected_output.getvalue()
     except Exception as e:
-        error = e
+        error = traceback.format_exc()
     finally:
         sys.stdout = old_stdout # Restore stdout
     
@@ -255,7 +256,7 @@ Python 규칙:
 **현재 진행할 단계**:
 {{current_step}}
 
-**이전 단계까지의 실행 컨텍스트 (변수 목록)**:
+**이전 단계까지의 실행 컨텍스트 (변수 목록), python_context**:
 {{python_context}}
 
 {{step_feedback}}

@@ -157,7 +157,7 @@ def generate_sql_queries_node(state: AgentState):
     if feedback:
         feedback = f"이전에 생성한 결과와 피드백:\n{state.get('sql_queries')}\n{feedback}"
     # Retrieve relevant business rules for SQL
-    business_rules = retrieve_relevant_rules(state["user_query"], category="sql")
+    business_rules = retrieve_relevant_rules(state["user_query"], category="sql", rule_type="business")
     
     result = chain.invoke({
         "user_query": state["user_query"],
@@ -177,7 +177,7 @@ def validate_sql_query_node(state: AgentState):
     )
     chain = prompt | llm | JsonOutputParser()
     # Retrieve relevant business rules for SQL validation
-    business_rules = retrieve_relevant_rules(state["user_query"], category="sql")
+    business_rules = retrieve_relevant_rules(state["user_query"], category="sql", rule_type="business")
 
     result = chain.invoke({
         "user_query": state["user_query"],
@@ -253,6 +253,7 @@ def plan_python_analysis_node(state: AgentState):
         "current_step_index": 0,
         "python_context": schema_info,
         "python_code": "",
+        "python_execution_result": "",
         "step_retry_count": 0,  # 초기 retry count
         "max_step_retries": 3   # 단계별 최대 3회 재시도
     }
@@ -401,6 +402,7 @@ def check_step_result(state: AgentState):
     
     if validation["is_valid"]:
         next_index = state["current_step_index"] + 1
+        state["python_execution_result"] += "\n\n" + state["step_result"]
         if next_index < len(state["python_plan"]):
             print(f"다음 단계로 이동: {next_index + 1}/{len(state['python_plan'])}")
             return "next_step"
