@@ -2,7 +2,7 @@
     {
         "category": "common",
         "title": "Data Relationship Summary",
-        "content": "- Creator's name can be found in `t_member.nickname`.\n- `t_member.no` joins with `t_creator.member_no`.\n- `t_creator.no` joins with `t_payment.seller_creator_no`.\n- `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.\n- `t_post.member_no` represents the Creator (Uploader).\n- `t_post_view_log.member_no` represents the Viewer."
+        "content": "- Creator's name can be found in `t_member.nickname`.\n- `t_member.no` joins with `t_creator.member_no`.\n- `t_creator.no` joins with `t_payment.seller_creator_no`.\n- `t_fanding.no` is the Primary Key. It is referred to as `fanding_no` in other tables (e.g., `t_fanding_log.fanding_no`, `t_payment.fanding_no`).\n- `t_fanding_log.coupon_member_no` joins with `t_creator_coupon_member.no` to check for coupon usage.\n- `t_post.member_no` represents the Creator (Uploader).\n- `t_post_view_log.member_no` represents the Viewer."
     },
     {
         "category": "common",
@@ -22,11 +22,16 @@
     {
         "category": "common",
         "title": "Post & Activity Analysis Rules",
-        "content": "- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.\n  - **Logic**: `t_post.del_datetime` IS NULL.\n- **Audience Validity (No Self-Views)**: When calculating \"Visitors\", \"Views\", or \"Visit Rate\", you MUST exclude the Creator's own activity.\n  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).\n- **Visit Rate Calculation**:\n  - Numerator: Unique Viewers (excluding Creator).\n  - Denominator: Total Active Members (at snapshot)."
+        "content": "- **Content Validity (Deleted Posts)**: When querying `t_post` or joining with `t_post_view_log`, YOU MUST exclude deleted posts to prevent overcounting.\n  - **Logic**: `t_post.del_datetime` IS NULL.\n- **Audience Validity (No Self-Views)**: When calculating \"Visitors\", \"Views\", or \"Visit Rate\", you MUST exclude the Creator's own activity.\n  - **Logic**: `t_post_view_log.member_no` (Viewer) != `t_post.member_no` (Creator).\n  - **Implementation**: Apply this filter in the SQL `WHERE` clause whenever possible (e.g., `AND pv.member_no != p.member_no`).\n- **Visit Rate Calculation**:\n  - Numerator: Unique Viewers (excluding Creator).\n  - Denominator: Total Active Members (at snapshot)."
     },
     {
         "category": "common",
         "title": "Activity & Engagement Metric Definitions",
-        "content": "- **Average Daily Visitors (Monthly)**:\n  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.\n- **Visit Rate (%)**:\n  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.\n- **Top Posts (Monthly)**:\n  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count."
+        "content": "- **Average Daily Visitors (Monthly)**:\n  - **Definition**: The average of **Daily Active Users (DAU) = Post View Users** over the month.\n- **Visit Rate (%)**:\n  - **Definition**: The percentage of *Active Paid Members* who viewed a post at least once during the month.\n- **Top Posts (Monthly)**:\n  - **Definition**: The top 5 posts **uploaded/created within the target month**, ranked by their unique visitor count **during the target month**.\n  - **Logic**: Filter `t_post` by `ins_datetime` (Target Month) AND `t_post_view_log` by `ins_datetime` (Target Month)."
+    },
+    {
+        "category": "python",
+        "title": "Python Constraints",
+        "content": "- **No External Dependencies**: Do NOT use `tabulate` or `.to_markdown()`. These libraries are not installed. Use standard `print(df)` or `print(df.to_string())` for output.\n- **Empty Data Handling**: If a key DataFrame (e.g., post views for a major creator) is empty, verify your query conditions (date range, join keys) before concluding there is no data. 'Empty DataFrame' is often a sign of a logic error in the query."
     }
 ]

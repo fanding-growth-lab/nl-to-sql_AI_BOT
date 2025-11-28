@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime
 from typing import TypedDict, List, Dict, Any
 
 from langgraph.graph import StateGraph, END
@@ -10,6 +11,7 @@ from test_config import (
     STATE,
     save_result,
     run_dynamic_code,
+    engine, # ✅ engine 추가
     PROMPT_SEARCH_RELATIVE_TABLES,
     PROMPT_GENERATE_SQL_QUERY,
     PROMPT_VALIDATE_SQL_QUERY,
@@ -17,6 +19,7 @@ from test_config import (
     PROMPT_PLAN_PYTHON_ANALYSIS,
     PROMPT_GENERATE_PYTHON_STEP,
     PROMPT_VALIDATE_PYTHON_STEP,
+    PROMPT_REFINE_QUERY,
 )
 from rule_rag import retrieve_relevant_rules
 
@@ -106,6 +109,7 @@ def summarize_context_for_llm(context: Dict[str, Any]) -> str:
 
 class AgentState(TypedDict):
     user_query: str
+    original_query: str  # 정제 전 원본 질문
     rag_schema_context: str
     relative_tables: List[Dict[str, Any]]
     sql_queries: List[Dict[str, str]]
@@ -129,6 +133,26 @@ class AgentState(TypedDict):
     step_validation: Dict[str, Any]
     step_retry_count: int  # 현재 단계 재시도 횟수
     max_step_retries: int  # 단계별 최대 재시도 횟수
+
+
+def refine_query_node(state: AgentState):
+    print("---노드: 질문 정제---")
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    
+    prompt = PromptTemplate(
+        template=PROMPT_REFINE_QUERY,
+        input_variables=["user_query", "current_date"],
+    )
+    chain = prompt | llm | StrOutputParser()
+    refined_query = chain.invoke({
+        "user_query": state["user_query"],
+        "current_date": current_date
+    })
+    
+    print(f"원본 질문: {state['user_query']}")
+    print(f"정제된 질문: {refined_query}")
+    
+    return {"user_query": refined_query, "original_query": state["user_query"]}
 
 
 def search_relative_tables_node(state: AgentState):
@@ -209,43 +233,58 @@ def plan_python_analysis_node(state: AgentState):
     print("---노드: Python 분석 계획 수립---")
     prompt = PromptTemplate(
         template=PROMPT_PLAN_PYTHON_ANALYSIS,
-        input_variables=["user_query", "relative_tables", "business_rules", "sql_queries"],
+        input_variables=["user_query", "relative_tables", "business_rules", "sql_queries", "python_rules"],
     )
     chain = prompt | llm | StrOutputParser()
     
-    # 계획 단계에서는 비즈니스 규칙만 필요 (무엇을 해야 하는지)
     business_rules = retrieve_relevant_rules(state["user_query"], category="common", rule_type="business")
+    python_rules = retrieve_relevant_rules(state["user_query"], category="python", rule_type="python")
     
     raw_result = chain.invoke({
         "user_query": state["user_query"],
         "relative_tables": state["relative_tables"],
         "business_rules": business_rules,
-        "sql_queries": state["sql_queries"]
+        "sql_queries": state["sql_queries"],
+        "python_rules": python_rules
     })
     
     # JSON 파싱 시도 (Markdown 코드 블록 제거 및 리스트 추출)
     try:
-        # ```json ... ``` 또는 [...] 패턴 찾기
-        json_match = re.search(r'\[.*\]', raw_result, re.DOTALL)
+        # 1. JSON 객체 찾기 ({ ... })
+        json_match = re.search(r'\{[\s\S]*\}', raw_result)
         if json_match:
             json_str = json_match.group(0)
-            result = json.loads(json_str)
+            parsed_json = json.loads(json_str)
+            
+            # reasoning과 plan 추출
+            reasoning = parsed_json.get("reasoning", "")
+            result = parsed_json.get("plan", [])
+            
+            print(f"\n🧠 계획 추론:\n{reasoning}\n")
+            
         else:
-            # JSON 패턴을 못 찾으면 전체 텍스트를 줄바꿈으로 분리하여 리스트로 변환 (fallback)
-            print("⚠️ 계획 파싱 경고: JSON 리스트를 찾을 수 없어 텍스트를 줄 단위로 분리합니다.")
-            result = [line.strip() for line in raw_result.split('\n') if line.strip() and not line.strip().startswith('```')]
+            # 2. JSON 리스트 찾기 ([ ... ]) - 구버전 호환
+            json_list_match = re.search(r'\[.*\]', raw_result, re.DOTALL)
+            if json_list_match:
+                json_str = json_list_match.group(0)
+                result = json.loads(json_str)
+            else:
+                # 3. Fallback
+                print("⚠️ 계획 파싱 경고: JSON을 찾을 수 없어 텍스트를 줄 단위로 분리합니다.")
+                result = [line.strip() for line in raw_result.split('\n') if line.strip() and not line.strip().startswith('```')]
             
     except json.JSONDecodeError as e:
         print(f"⚠️ 계획 파싱 에러: {e}. 텍스트 기반으로 처리합니다.")
         result = [line.strip() for line in raw_result.split('\n') if line.strip() and not line.strip().startswith('```')]
 
-    save_result(result, "python_plan.json", True)
+    save_result(raw_result, "python_plan.json", True)
     
     # 테이블 스키마를 python_context에 포함 (코드 생성 시 참조용)
     schema_info = {
         "_table_schemas": state["relative_tables"],
         "sql_queries": state["sql_queries"],  # SQL 쿼리 리스트 추가
-        "__builtins__": __builtins__
+        "__builtins__": __builtins__,
+        "engine": engine  # ✅ DB 연결 객체 주입 (Mock 방지)
     }
     
     return {
@@ -354,7 +393,7 @@ def generate_python_step_code_node(state: AgentState):
             "business_rules": business_rules[:200] + "..." if len(business_rules) > 200 else business_rules,
             "python_rules": python_rules[:200] + "..." if len(python_rules) > 200 else python_rules,
             "context_summary": context_summary[:300] + "..." if len(context_summary) > 300 else context_summary,
-            "step_feedback": step_feedback[:200] + "..." if step_feedback and len(step_feedback) > 200 else step_feedback
+            "step_feedback": step_feedback
         },
         "generated_code": clean_code
     }
@@ -390,13 +429,9 @@ def execute_python_step_node(state: AgentState):
         print(f"실행 오류: {error}")
     else:
         print(f"실행 결과:\n{step_result}")
-
-    # Accumulate code
-    new_accumulated_code = state["python_code"] + "\n\n" + f"# Step: {current_step}\n" + state["step_code"]
         
     return {
         "step_result": step_result,
-        "python_code": new_accumulated_code,
         "python_context": state["python_context"]
     }
 
@@ -431,7 +466,16 @@ def validate_python_step_node(state: AgentState):
     })
     
     print(f"검증 결과: {result}")
-    return {"step_validation": result}
+    
+    updates = {"step_validation": result, "python_code": state.get("python_code", "")}
+    
+    # 검증 성공 시 결과 누적 (Conditional Edge에서는 state 수정 불가하므로 여기서 처리)
+    if result.get("is_valid"):
+        current_acc = state.get("python_execution_result", "")
+        updates["python_execution_result"] = current_acc + "\n\n" + state["step_result"]
+        updates["python_code"] += f"\n\n---\n\n" + state["step_code"]
+        
+    return updates
 
 
 def check_step_result(state: AgentState):
@@ -440,7 +484,7 @@ def check_step_result(state: AgentState):
     
     if validation["is_valid"]:
         next_index = state["current_step_index"] + 1
-        state["python_execution_result"] += "\n\n" + state["step_result"]
+        
         if next_index < len(state["python_plan"]):
             print(f"다음 단계로 이동: {next_index + 1}/{len(state['python_plan'])}")
             return "next_step"
@@ -482,7 +526,8 @@ def generate_final_result_node(state: AgentState):
         "python_execution_result": state.get("python_execution_result", ""),
         "error_message": state.get("error", "")
     })
-    save_result(result, "final_result.txt", True)
+    save_result(result, "final_result.md", False)
+    save_result(state.get("python_code", ""), "python_code.py", True)
     return {"final_result": result}
 
 
@@ -492,6 +537,7 @@ def generate_final_result_node(state: AgentState):
 workflow = StateGraph(AgentState)
 
 # --- 노드 정의 ---
+workflow.add_node("refine_query", refine_query_node)
 workflow.add_node("search_relative_tables", search_relative_tables_node)
 workflow.add_node("generate_sql_queries", generate_sql_queries_node)
 workflow.add_node("validate_sql_query", validate_sql_query_node)
@@ -513,7 +559,8 @@ def decide_sql_retry(state: AgentState):
         return "generate_sql_queries"
 
 # --- 엣지 추가 ---
-workflow.set_entry_point("search_relative_tables")
+workflow.set_entry_point("refine_query")
+workflow.add_edge("refine_query", "search_relative_tables")
 workflow.add_edge("search_relative_tables", "generate_sql_queries")
 workflow.add_edge("generate_sql_queries", "validate_sql_query")
 
